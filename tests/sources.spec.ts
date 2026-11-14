@@ -18,6 +18,7 @@ import { HealthBoard } from '../src/infra/health.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
+import type { SourceContext } from '../src/sources/host.ts'
 import { SetupError, type SetupProblem } from '../src/setup.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -492,6 +493,31 @@ describe('github source', () => {
     expect(h.store.get('github-cursor:7')).toBeDefined()
     // A Thread whose title the Source had not read yet is named by its number and title, with its number as a fact.
     expect(h.store.threads.get('github:7')!.meta).toMatchObject({ title: 'Fix the margin', label: '#7 Fix the margin', facts: { number: { value: '#7' } } })
+    h.store.close()
+  })
+  it('skips legacy Reporter Threads, clears their stale poll error, and still reports an invalid platform ID', async () => {
+    const h = host(), at = new Date().toISOString()
+    const reporterThread = 'reporter:legacy-scene:7', reporterKey = `github:${reporterThread}`
+    const reporterTrigger: Trigger = { id: 'reporter:legacy-trigger', source: 'github', threads: [{ source: 'github', id: reporterThread }],
+      actor: { source: 'github', id: 'alice' }, human: true, at, text: '本地 Reporter 请求', meta: {} }
+    h.store.triggers.save(reporterTrigger)
+    h.store.threads.save({ key: reporterKey, ref: { source: 'github', id: reporterThread }, createdAt: at, lastAt: at,
+      subscriptions: ['reporter-ticket'], correlated: [], pending: [], meta: { label: 'Reporter 场景', pollError: 'Subscribed thread has no GitHub issue or PR number' } })
+    h.store.threads.save({ key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: at, lastAt: at,
+      subscriptions: ['platform-ticket'], correlated: [], pending: [], meta: { number: 7, isPr: false, title: 'Legacy Issue' } })
+    const ctx = { ...h, config: (kind: string) => kind === 'github' ? { repository: 'acme/widgets' } : undefined } as unknown as SourceContext
+    const reads = github(h, { 'issues/7/comments': [] })
+
+    await pollGithubThreads(ctx)
+    expect(reads.map(path => path.split('?')[0])).toEqual(['issues/7/comments'])
+    expect(h.store.threads.get(reporterKey)).toMatchObject({ subscriptions: ['reporter-ticket'], meta: { label: 'Reporter 场景' } })
+    expect(h.store.threads.get(reporterKey)?.meta).not.toHaveProperty('pollError')
+    expect(h.store.read.threadTriggers(reporterKey).map(trigger => trigger.id)).toEqual([reporterTrigger.id])
+
+    h.store.threads.save({ key: 'github:not-a-platform-id', ref: { source: 'github', id: 'not-a-platform-id' }, createdAt: at, lastAt: at,
+      subscriptions: ['platform-ticket'], correlated: [], pending: [], meta: {} })
+    await pollGithubThreads(ctx)
+    expect(h.store.threads.get('github:not-a-platform-id')?.meta.pollError).toContain('Subscribed thread has no GitHub issue or PR number')
     h.store.close()
   })
   it('polls a subscribed Thread for two weeks after the Ticket that follows it ended', async () => {

@@ -10,6 +10,7 @@ import { readGitlabCi, readGitlabRepositoryPath, gitlabCiCounts, gitlabCiFact, g
 import { gitlabKind, pollRound } from '../src/sources/gitlab.ts'
 import { sendGitlab } from '../src/sources/gitlab-channel.ts'
 import { GitlabMergeRequestSchema, GitlabPipelineSchema, gitlabChannel } from '../src/sources/gitlab-trigger.ts'
+import type { Thread } from '../src/core/index.ts'
 import type { SourceContext } from '../src/sources/host.ts'
 import type { Deployment } from '../src/deployment.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -44,7 +45,7 @@ describe('GitLab settings rendering', () => {
   })
 })
 
-function pollHarness(run: (args: string[]) => Promise<string>, disableOnMergeRequests = false) {
+function pollHarness(run: (args: string[]) => Promise<string>, disableOnMergeRequests = false, subscribed: Thread[] = []) {
   const project = { id: 'gitlab-test', provider: 'gitlab', host: HOST, project: PROJECT, cli: 'glab', login: 'agent', noreply: 'agent@example.test' } as const
   const deployment = testDeployment({ activeProject: project, projects: { [project.id]: project as never } }) as Deployment
   const runCommand = async (_program: string, args: string[]) => {
@@ -61,7 +62,7 @@ function pollHarness(run: (args: string[]) => Promise<string>, disableOnMergeReq
     deployment, commands, ready: Promise.resolve(), configured: () => true, config: (kind: string) => kind === 'gitlab' && enabled ? config : undefined,
     state: { get: (key: string) => state.get(key), set: (key: string, value: unknown) => value === undefined ? state.delete(key) : state.set(key, value),
       keys: () => [] },
-    threads: { get: () => undefined, subscribed: () => [], patch: vi.fn(), describe: vi.fn() },
+    threads: { get: () => undefined, subscribed: () => subscribed, patch: vi.fn(), describe: vi.fn() },
     tickets: { get: () => undefined, open: () => [], bindThread: vi.fn(), threadClosed: vi.fn() },
     receive: vi.fn(), report: vi.fn(), notify: vi.fn(), atomic: (work: () => unknown) => work(),
   } as unknown as SourceContext
@@ -251,6 +252,29 @@ describe('GitLab CI evidence', () => {
 })
 
 describe('GitLab polling and delivery', () => {
+  it('skips a subscribed Reporter Thread and continues polling a real Issue Thread', async () => {
+    const at = new Date().toISOString()
+    const reporter: Thread = { key: 'gitlab-test:reporter:bootstrap:12', ref: { source: 'gitlab-test', id: 'reporter:bootstrap:12' },
+      createdAt: at, lastAt: at, subscriptions: ['reporter-ticket'], correlated: [], pending: [], meta: { pollError: 'old Reporter poll error' } }
+    const issue: Thread = { key: 'gitlab-test:issue:12', ref: { source: 'gitlab-test', id: 'issue:12' }, createdAt: at, lastAt: at,
+      subscriptions: ['issue-ticket'], correlated: [], pending: [], meta: {} }
+    const reads: string[] = []
+    const harness = pollHarness(async args => {
+      const endpoint = args[1] ?? ''
+      reads.push(endpoint)
+      if (endpoint === `${PATH}/issues/12`) return JSON.stringify({ iid: 12, title: 'Issue 12', description: '', state: 'opened',
+        created_at: at, updated_at: at, web_url: `https://${HOST}/${PROJECT}/-/issues/12`, author: { username: 'alice' } })
+      return '[]'
+    }, false, [reporter, issue])
+
+    await pollRound(harness.context)
+
+    expect(reads).toContain(`${PATH}/issues/12`)
+    expect(reads.some(endpoint => endpoint.includes('reporter:'))).toBe(false)
+    expect(harness.context.threads.patch).toHaveBeenCalledWith(reporter.key, { pollError: undefined })
+    expect(harness.context.threads.patch).toHaveBeenCalledWith(issue.key, { pollError: undefined })
+  })
+
   it('does not advance the poll cursor on HTTP 503 and retries on the next poll', async () => {
     const issueReads: string[] = []
     let fail = true

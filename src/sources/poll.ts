@@ -36,11 +36,18 @@ export function polled(ctx: SourceContext, thread: Thread, now = Date.now()): bo
 }
 /** Steps a poll start timestamp back by 5 seconds so late-arriving remote events are not missed; deterministic trigger IDs deduplicate overlaps. */
 export const cursorAt = (started: string): string => new Date(Date.parse(started) - 5000).toISOString()
-/** Polls each subscribed Thread of `source` within the horizon independently; records failures on the Thread as `pollError` (unless `stopped()`) and clears `pollError` on success. */
+/** Reporter Thread ID 使用本地保留命名空间，不表示平台资源。 */
+const isReporterThread = (thread: Pick<Thread, 'ref'>): boolean => thread.ref.id.startsWith('reporter:')
+/** 在时限内独立轮询已订阅的平台 Thread；失败时记录 `pollError`（除非 `stopped()`），成功后清除该字段。Reporter Thread 仍由 Engine 订阅，但不会交给 Provider 读取。 */
 export async function pollThreads(ctx: SourceContext, source: string, stopped: () => boolean, poll: (thread: Thread) => Promise<void>,
   skip: (thread: Thread) => boolean = () => false): Promise<void> {
   for (const thread of ctx.threads.subscribed(source)) {
     if (stopped()) return
+    if (isReporterThread(thread)) {
+      // 清除旧版本把本地 Thread 当成平台资源读取时留下的错误诊断。
+      if (thread.meta.pollError !== undefined) ctx.threads.patch(thread.key, { pollError: undefined })
+      continue
+    }
     if (skip(thread) || !polled(ctx, thread)) continue
     try {
       await poll(thread)

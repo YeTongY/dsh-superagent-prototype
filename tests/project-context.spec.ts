@@ -11,7 +11,9 @@ import { deploymentForSource, type ResolvedProject } from '../src/project-source
 import { projectSourceId } from '../src/project-source.ts'
 import { KV } from '../src/kv.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
+import { pollThreads } from '../src/sources/poll.ts'
 import type { SourceKind } from '../src/sources/kind.ts'
+import type { SourceContextDeps } from '../src/app/source-context.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
 const directories: string[] = []
@@ -107,4 +109,53 @@ it('项目注册表存在时缺失的 legacy github 身份拒绝回退到首个�
   const legacyCommands = new Commands(() => legacy, {}, new AbortController().signal)
   expect(legacyCommands.forSource('github')).toBe(legacyCommands)
   expect(deploymentForSource(legacy, 'github')).toBe(legacy)
+})
+
+it('共享 Provider 轮询边界跳过 legacy 与多项目 Reporter Thread，并保留订阅和历史', async () => {
+  const dir = directory(), store = new Store(join(dir, 'db.sqlite')); stores.push(store)
+  const githubId = projectSourceId('github', 'github.com', 'acme/second')
+  const gitlabId = projectSourceId('gitlab', 'gitlab.internal', 'team/second')
+  const projects: Record<string, ResolvedProject> = {
+    [githubId]: { id: githubId, provider: 'github', host: 'github.com', project: 'acme/second', cli: '/bin/false', login: 'bot', noreply: 'bot@github.test' },
+    [gitlabId]: { id: gitlabId, provider: 'gitlab', host: 'gitlab.internal', project: 'team/second', cli: '/bin/false', login: 'bot', noreply: 'bot@gitlab.test' },
+  }
+  store.saveSettings({ sources: {
+    github: { enabled: true, config: { repository: 'acme/legacy' } },
+    [githubId]: { kind: 'github', enabled: true, config: { repository: 'acme/second' } },
+    [gitlabId]: { kind: 'gitlab', enabled: true, config: { host: 'gitlab.internal', repository: 'team/second' } },
+  } })
+  const registry = new SourceRegistry(() => store.settings())
+  registry.register(kind('github', {})); registry.register(kind('gitlab', {}))
+  const multi = testDeployment({ stateDir: dir, projects })
+  const legacy = testDeployment({ stateDir: dir })
+  const deps = (deployment: ReturnType<typeof testDeployment>): SourceContextDeps => ({
+    store, outbox: { send: () => {} }, engine: { bindThread: () => ({} as Ticket), threadClosed: () => {} },
+    commands: new Commands(() => deployment, {}, new AbortController().signal), sources: registry, deployment,
+    ready: Promise.resolve(), configured: () => true, receive: () => 'stored',
+  })
+  const contexts = [
+    { id: 'github', provider: 'github', nativeId: '7', context: sourceContextOf(deps(legacy), { kind: 'github', health: [], id: 'github' }) },
+    { id: githubId, provider: 'github', nativeId: '7', context: sourceContextOf(deps(multi), { kind: 'github', health: [], id: githubId }) },
+    { id: gitlabId, provider: 'gitlab', nativeId: 'issue:7', context: sourceContextOf(deps(multi), { kind: 'gitlab', health: [], id: gitlabId }) },
+  ]
+
+  for (const [index, item] of contexts.entries()) {
+    const reporterId = `reporter:scene-${index}:12`, key = `${item.id}:${reporterId}`, at = new Date().toISOString()
+    const trigger: Trigger = { id: item.id === 'github' ? `reporter:scene-${index}` : `${item.id}/reporter:scene-${index}`,
+      source: item.id, threads: [{ source: item.id, id: reporterId }], actor: { source: item.id, id: 'alice' },
+      human: true, at, text: 'Reporter input', meta: {} }
+    store.triggers.save(trigger)
+    store.threads.save({ key, ref: { source: item.id, id: reporterId }, createdAt: at, lastAt: at,
+      subscriptions: ['reporter-ticket'], correlated: [], pending: [], meta: { label: 'Reporter scene', pollError: 'old provider error' } })
+    store.threads.save({ key: `${item.id}:${item.nativeId}`, ref: { source: item.id, id: item.nativeId }, createdAt: at,
+      subscriptions: ['platform-ticket'], correlated: [], pending: [], meta: {} })
+
+    const polled: string[] = []
+    await pollThreads(item.context, item.provider, () => false, async thread => { polled.push(thread.ref.id) })
+
+    expect(polled).toEqual([item.nativeId])
+    expect(store.threads.get(key)).toMatchObject({ subscriptions: ['reporter-ticket'], meta: { label: 'Reporter scene' } })
+    expect(store.threads.get(key)?.meta).not.toHaveProperty('pollError')
+    expect(store.read.threadTriggers(key).map(value => value.id)).toEqual([trigger.id])
+  }
 })
