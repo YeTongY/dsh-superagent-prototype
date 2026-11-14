@@ -9,6 +9,8 @@ const SimulatorTurnSchema = z.discriminatedUnion('kind', [
     after_ms: z.number().int().nonnegative().max(86_400_000).default(0) }).strict(),
   z.object({ kind: z.literal('finished'), summary: z.string().max(1_000).optional() }).strict(),
 ])
+/** 从实际的 Simulator 输出校验器生成，供 Prompt 与回归共用。 */
+export const REPORTER_SIMULATOR_OUTPUT_JSON_SCHEMA = z.toJSONSchema(SimulatorTurnSchema, { target: 'draft-07', io: 'input' })
 const ReviewerOutputSchema = z.object({ summary: z.string().min(1).max(8_000), findings: z.array(z.object({ severity: z.enum(['info', 'warning', 'error']),
   text: z.string().min(1).max(4_000), evidence: z.array(z.string().max(300)).max(20).optional() }).strict()).max(100) }).strict()
 const ModelUsageSchema = z.object({ model: z.string().max(200).optional(), prompt_tokens: z.number().int().nonnegative().optional(),
@@ -70,7 +72,9 @@ export interface ReporterSimulatorRunResult {
   usage: ReporterModelUsageSummary
   report?: ReporterScenarioResult
   error_code?: string
+  validation_issues?: ReporterSimulatorValidationIssue[]
 }
+export interface ReporterSimulatorValidationIssue { path: string; code: string }
 export interface ReporterReviewerRunResult {
   scenario_id: string
   status: 'recorded' | 'invalid_output' | 'incomplete'
@@ -79,7 +83,7 @@ export interface ReporterReviewerRunResult {
   report?: ReporterScenarioResult
 }
 
-const SIMULATOR_INSTRUCTIONS = `你扮演场景中可见的用户或协作角色，遵守 Persona 和目标，根据最近可见对话逐步给出下一步动作。你只能给出 JSON：{"kind":"action","actor_id":"场景内 Actor","action":{"kind":"message|review|approval|ci|stop",...},"after_ms":0}，或者在现实用户会话自然结束时给出 {"kind":"finished"}。不要猜测或要求查看隐藏 Oracle、内部 Ticket 状态、运行时评分或未来测试步骤。不要把后续所有动作一次性说完。`
+const SIMULATOR_INSTRUCTIONS = `你扮演场景中可见的用户或协作角色，遵守 Persona 和目标，根据最近可见对话逐步决定下一条用户动作；每次只输出一个对象，不要把后续动作一次性列出。结束时输出 kind 为 finished，可附简短 summary。动作 kind 的具体字段、必填字段、可选字段、取值范围和禁止额外字段均由下面的 JSON Schema 定义，请严格遵守，不要自行添加或改名字段。不要猜测或要求查看隐藏 Oracle、内部 Ticket 状态、运行时评分或未来测试步骤。若当前对话尚未满足目标，请继续作为真实用户自然追问。输出必须遵循此 JSON Schema：\n${JSON.stringify(REPORTER_SIMULATOR_OUTPUT_JSON_SCHEMA)}`
 const REVIEWER_INSTRUCTIONS = `你是定性沟通审查者。只根据提供的轨迹、输出和结构化状态总结沟通质量、异常和证据。不要判定 behavioral_pass、delivery_pass 或 platform_pass，不要更改任何确定性结果。只输出 JSON：{"summary":"...","findings":[{"severity":"info|warning|error","text":"...","evidence":["轨迹序号或可见事件标识"]}]}。`
 export const REPORTER_REVIEWER_INSTRUCTIONS = REVIEWER_INSTRUCTIONS
 export function parseReporterReviewerOutput(value: unknown): z.infer<typeof ReviewerOutputSchema> | undefined {
@@ -196,6 +200,15 @@ function usageFrom(response: ReporterModelResponse): z.infer<typeof ModelUsageSc
   return parsed.success ? parsed.data : undefined
 }
 
+const simulatorOutputFields = new Set(['kind', 'actor_id', 'action', 'text', 'addressed', 'location', 'state', 'body', 'name', 'summary', 'after_ms'])
+function simulatorValidationIssues(error: z.ZodError): ReporterSimulatorValidationIssue[] {
+  return error.issues.slice(0, 8).map(issue => ({
+    path: issue.path.length ? issue.path.map(part => typeof part === 'number' ? `[${part}]`
+      : typeof part === 'string' && simulatorOutputFields.has(part) ? part : '[字段]').join('.').slice(0, 160) : '$',
+    code: issue.code.slice(0, 40),
+  }))
+}
+
 async function invokeAndRecord(options: { invoke: ReporterModelInvoker; request: ReporterModelRequest; reporter: Pick<LocalReporter, 'recordUsage'>;
   scenarioId: string; usage: Accumulator }): Promise<ReporterModelResponse> {
   const { signal } = options.request
@@ -258,7 +271,8 @@ export async function runUserSimulator(options: {
       if (budgetExceeded(usage, budget)) { return finish('incomplete', 'budget_exhausted', options.reporter.scenario(options.scenarioId)) }
 
       const parsed = SimulatorTurnSchema.safeParse(response.output)
-      if (!parsed.success) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'invalid_simulator_output')
+      if (!parsed.success) return { ...finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'invalid_simulator_output'),
+        validation_issues: simulatorValidationIssues(parsed.error) }
       if (parsed.data.kind === 'finished') {
         if (turns < minTurns) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'simulator_finished_too_early')
         await abortable(options.waitForSuperagent(signal), signal)
@@ -289,7 +303,8 @@ export async function runUserSimulator(options: {
     return finish('incomplete', 'max_calls', options.reporter.scenario(options.scenarioId))
   } catch (error) {
     if (signal.aborted) return finish('incomplete', stopReason(signal), options.reporter.scenario(options.scenarioId))
-    if (error instanceof z.ZodError) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'invalid_model_response')
+    if (error instanceof z.ZodError) return { ...finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'invalid_model_response'),
+      validation_issues: simulatorValidationIssues(error) }
     const errorCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code
       : error instanceof Error && error.message === 'model_call_failed' ? 'model_call_failed' : 'target_wait_failed'
     return finish('incomplete', 'input_rejected', options.reporter.scenario(options.scenarioId), errorCode)

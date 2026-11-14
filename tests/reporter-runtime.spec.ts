@@ -4,9 +4,23 @@ import { Commands } from '../src/infra/commands.ts'
 import { projectSourceId } from '../src/project-source.ts'
 import { gitlabKind } from '../src/sources/gitlab.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
+import { createRuntimeReporterBrowserFactory } from '../src/app/runtime.ts'
+import { inject as runtimeInject } from '../src/index.ts'
 
 let host: Host | undefined
 afterEach(async () => { await host?.stop(); host = undefined; vi.unstubAllEnvs() })
+
+it('keeps DSH Connection optional until browser mode requests its authenticated URL', async () => {
+  expect(runtimeInject).not.toContain('connection')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_BROWSER', '1')
+  host = await startRuntime()
+  expect(host.runtime.reporterRuns).toBeDefined()
+
+  const factory = createRuntimeReporterBrowserFactory({ host: '127.0.0.1', port: 3082, protocol: 'http:' }, () => undefined)
+  await expect(factory.create(new AbortController().signal)).rejects.toMatchObject({ code: 'browser_unavailable' })
+})
 
 it('runs a request and worker report through Engine while capturing replies locally', async () => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')

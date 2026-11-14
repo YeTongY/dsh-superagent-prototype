@@ -38,7 +38,7 @@ import { gitlabMergeRequestEndNotices } from '../sources/gitlab-pull.ts'
 import { createLocalReporter, type LocalReporter } from '../reporter/local-reporter.ts'
 import type { ReporterRuntimeSnapshot } from '../reporter/protocol.ts'
 import { ReporterAutonomousRuns, type ReporterAutonomousHost, type ReporterReadOnlyProbe } from '../reporter/autonomous.ts'
-import { createReporterBrowserDriver } from '../reporter/browser.ts'
+import { createReporterBrowserDriver, ReporterBrowserError } from '../reporter/browser.ts'
 import { createReporterModelInvoker, resolveReporterModel } from '../reporter/dsh-model.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
@@ -58,6 +58,20 @@ import { projectForTrigger } from '../project-source.ts'
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
+
+/** 仅用于生成一次性浏览器登录 URL 的最小 DSH Host Connection 接口。 */
+export interface ReporterBrowserConnection { authenticatedUrl(baseUrl: string): string }
+
+/** 启动时不要求浏览器认证服务；只有调用浏览器模式时才检查，并返回稳定错误码。 */
+export function createRuntimeReporterBrowserFactory(webServer: { host: string; port: number; protocol: string; getOrigin?: () => string },
+  getConnection: () => ReporterBrowserConnection | undefined): NonNullable<ReporterAutonomousHost['browser']> {
+  return { create: async signal => {
+    const connection = getConnection()
+    if (!connection || typeof connection.authenticatedUrl !== 'function') throw new ReporterBrowserError('browser_unavailable')
+    const origin = webServer.getOrigin?.() ?? `${webServer.protocol}//${webServer.host}:${webServer.port}`
+    return createReporterBrowserDriver({ expectedOrigin: origin, getAuthenticatedUrl: () => connection.authenticatedUrl(origin), signal })
+  } }
+}
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
@@ -80,6 +94,7 @@ export class Runtime extends Service implements SourceHost {
   readonly passes: Passes
   readonly reporter?: LocalReporter
   readonly reporterRuns?: ReporterAutonomousRuns
+  private reporterConnection?: ReporterBrowserConnection
   private readonly reporterToken?: string
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
@@ -200,21 +215,8 @@ export class Runtime extends Service implements SourceHost {
           return id === 'github' ? { id, provider: 'github', host: 'github.com', project: setup.deployment.repository } : undefined
         }
         const browserEnabled = process.env.DSH_SUPERAGENT_REPORTER_BROWSER === '1'
-        const browser = browserEnabled ? {
-          create: (signal: AbortSignal) => {
-            // DSH owns both the listener origin and the short-lived browser login URL.
-            // Keep its token inside the browser driver's initial navigation only.
-            const host = this.ctx as unknown as { connection?: { authenticatedUrl(origin: string): string | Promise<string> } }
-            const webServer = this.ctx.webServer as typeof this.ctx.webServer & { getOrigin?: () => string }
-            const origin = webServer.getOrigin?.() ?? `${webServer.protocol}//${webServer.host}:${webServer.port}`
-            if (!host.connection?.authenticatedUrl) throw new Error('DSH connection browser authentication is unavailable')
-            return createReporterBrowserDriver({ expectedOrigin: origin, getAuthenticatedUrl: () => {
-              const url = host.connection!.authenticatedUrl(origin)
-              if (typeof url !== 'string') throw new Error('DSH browser authentication URL must be synchronous')
-              return url
-            }, signal })
-          },
-        } : undefined
+        // 安装浏览器驱动时不把可选 DSH Connection 变成启动依赖；仅当 Reporter 选择浏览器实验时才解析认证 URL。
+        const browser = browserEnabled ? createRuntimeReporterBrowserFactory(this.ctx.webServer, () => this.reporterConnection) : undefined
         this.reporterRuns = new ReporterAutonomousRuns({ reporter: this.reporter, enabled: true,
           resolveProject: resolveReporterProject,
           allowedActors: id => resolveReporterProject(id) ? store.settings().policy.sources[id]?.allowed.map(actor => actor.id) ?? [] : [],
@@ -247,6 +249,12 @@ export class Runtime extends Service implements SourceHost {
     }
   }
   get health(): Readonly<Record<string, Health>> { return this.board.all }
+  /** 仅由 Cordis 的可选 `connection` 注入回调设置。 */
+  provideReporterBrowserConnection(connection: ReporterBrowserConnection): void { this.reporterConnection = connection }
+  /** Cordis 卸载或替换服务提供者时清除已注入的服务。 */
+  clearReporterBrowserConnection(connection: ReporterBrowserConnection): void {
+    if (this.reporterConnection === connection) this.reporterConnection = undefined
+  }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
   context(kind: { kind: string; health: readonly string[]; id?: string }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }

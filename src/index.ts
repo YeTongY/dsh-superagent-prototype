@@ -1,7 +1,7 @@
 /** Main plugin entry: mounts the Runtime and provides its restart callback for deployment account changes. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
-import { Runtime } from './app/runtime.ts'
+import { Runtime, type ReporterBrowserConnection } from './app/runtime.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
 
 export const name = 'dsh-superagent'
@@ -19,6 +19,13 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
     ctx.fiber.restart().then(() => { ctx.get('settings')?.describe() }).catch((error: unknown) => { ctx.logger.error('dsh-superagent restart failed: %s', String(error)) })
   }
   const runtime = new Runtime(ctx, machine, restart)
+  // 浏览器认证是可选能力；没有 Connection 时，Reporter 仿真与只读 HTTP 检查仍可运行。
+  ctx.inject(['connection'], connectionCtx => {
+    const connection = connectionCtx.get('connection') as ReporterBrowserConnection | undefined
+    if (!connection || typeof connection.authenticatedUrl !== 'function') return
+    runtime.provideReporterBrowserConnection(connection)
+    connectionCtx.effect(() => () => runtime.clearReporterBrowserConnection(connection))
+  })
   ctx.effect(() => async () => { await runtime.stop() })
   await runtime.ready
   ctx.logger.info(runtime.configured() ? 'dsh-superagent ready; the Superagent sidebar entry opens the management panel' : `dsh-superagent is waiting for setup: ${runtime.setupProblem?.detail ?? ''}`)

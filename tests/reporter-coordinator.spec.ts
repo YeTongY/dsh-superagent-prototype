@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createLocalReporter } from '../src/reporter/local-reporter.ts'
 import type { LocalReporter } from '../src/reporter/local-reporter.ts'
-import { runQualitativeReviewer, runUserSimulator, type ReporterModelInvoker, type ReporterModelRequest } from '../src/reporter/coordinator.ts'
+import { REPORTER_SIMULATOR_OUTPUT_JSON_SCHEMA, runQualitativeReviewer, runUserSimulator,
+  type ReporterModelInvoker, type ReporterModelRequest } from '../src/reporter/coordinator.ts'
 import type { ReporterProjectIdentity, ReporterRuntimeSnapshot } from '../src/reporter/protocol.ts'
 
 const project: ReporterProjectIdentity = { id: 'github-0123456789abcdef01234567', provider: 'github', host: 'github.com', project: 'acme/widgets' }
@@ -45,6 +46,28 @@ it('runs a multi-turn fake Simulator and completes after the injected model ends
   expect(waitForSuperagent).toHaveBeenCalledTimes(2)
   expect(requests[1]?.input).not.toHaveProperty('oracle')
   expect(reporter.scenario('coordinator-scenario')?.inputs).toHaveLength(1)
+})
+
+it('builds the Simulator instruction contract from the strict output validator schema', async () => {
+  const reporter = createReporter(), requests: ReporterModelRequest[] = []
+  const invoke: ReporterModelInvoker = vi.fn(async request => { requests.push(request); return actionResponse })
+
+  await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {}, maxTurns: 1 })
+
+  const instruction = requests[0]!.instructions
+  const marker = '输出必须遵循此 JSON Schema：\n'
+  const schemaJson = instruction.slice(instruction.indexOf(marker) + marker.length)
+  const schema = JSON.parse(schemaJson) as { oneOf: { properties: { kind: { const: string }; after_ms?: unknown; action?: { oneOf: unknown[] } }; required: string[] }[] }
+  expect(schema).toEqual(REPORTER_SIMULATOR_OUTPUT_JSON_SCHEMA)
+  expect(schemaJson).toContain('additionalProperties')
+  for (const actionKind of ['message', 'review', 'approval', 'ci', 'stop']) expect(schemaJson).toContain(actionKind)
+  expect(schemaJson).toContain('addressed')
+  expect(schemaJson).toContain('location')
+  expect(schemaJson).toContain('changes_requested')
+  expect(schemaJson).toContain('cancelled')
+  const actionVariant = schema.oneOf.find(variant => variant.properties.kind.const === 'action')!
+  expect(actionVariant.required).toEqual(['kind', 'actor_id', 'action'])
+  expect(actionVariant.properties.action?.oneOf).toHaveLength(5)
 })
 
 it.each([{ max_cost_usd: 0 }, { max_total_tokens: 0 }])('does not call a model when its initial budget is exhausted: %o', async budget => {
@@ -105,6 +128,21 @@ it('rejects extra Simulator output fields before submitting an action', async ()
   const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {} })
 
   expect(result).toMatchObject({ status: 'invalid_output', stop_reason: 'invalid_output', error_code: 'invalid_simulator_output' })
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('returns bounded schema-path diagnostics without echoing invalid action text or unknown fields', async () => {
+  const reporter = createReporter(), submit = vi.spyOn(reporter, 'submit')
+  const invoke = vi.fn(async () => ({ output: { kind: 'action', actor_id: 'alice', action: { kind: 'message', text: 'PRIVATE ACTION BODY', addressed: 'private-address-value' },
+    credential: 'PRIVATE CREDENTIAL' }, usage: actionResponse.usage }))
+
+  const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {} })
+
+  expect(result).toMatchObject({ status: 'invalid_output', error_code: 'invalid_simulator_output',
+    validation_issues: expect.arrayContaining([expect.objectContaining({ path: 'action.addressed', code: 'invalid_value' }),
+      expect.objectContaining({ path: '$', code: 'unrecognized_keys' })]) })
+  expect(result.validation_issues).toHaveLength(2)
+  expect(JSON.stringify(result.validation_issues)).not.toMatch(/PRIVATE ACTION BODY|private-address-value|PRIVATE CREDENTIAL/)
   expect(submit).not.toHaveBeenCalled()
 })
 

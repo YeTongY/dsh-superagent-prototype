@@ -159,23 +159,20 @@ it('shows an enabled idle Reporter distinctly from an active run and presents it
   server.reporter = { enabled: true, runs: [] }
   await mount()
   expect(text()).toContain(zh['reporter.enabledIdle'])
-  expect(text()).not.toContain(zh['reporter.status.running'])
+  expect(all('.dt-reporter-status')).toHaveLength(0)
 
   server.reporter = { enabled: true, runs: [autonomousRun('run-active', 'running', true)] }
   await remount()
   expect(text()).toContain(zh['reporter.status.running'])
   expect(text()).toContain('阶段：simulation')
   expect(text()).toContain('仿真和服务检查')
-  expect(text()).toContain('模型：host/reporter-model')
+  expect(text()).toContain('模型 host/reporter-model')
   expect(text()).toContain('推理等级：medium')
-  expect(text()).toContain('实验 1')
-  expect(text()).toContain('用户动作 2')
-  expect(text()).toContain('模型调用 4')
-  expect(text()).toContain('输入 Token：1240')
-  expect(text()).toContain('输出 Token：320')
-  expect(text()).toContain('费用（美元）：未知')
-  expect(text()).toContain('重试次数：未知')
-  expect(text()).toContain('用量部分未知')
+  expect(text()).toContain('实验1')
+  expect(text()).toContain('用户动作2')
+  expect(text()).toContain('模型调用4')
+  expect(all('.dt-reporter-details').every(item => !(item as HTMLDetailsElement).open)).toBe(true)
+  expect(all('.dt-reporter-run .dt-reporter-metrics .dt-reporter-metric')).toHaveLength(3)
   expect(text()).toContain('auto-scenario-1')
   expect(text()).toContain('自主测试过程')
   expect(text()).toContain('一条简短的产品请求可能让目标先确认需求。')
@@ -185,11 +182,12 @@ it('shows an enabled idle Reporter distinctly from an active run and presents it
   expect(text()).toContain('HTTP 状态 200')
   expect(text()).toContain('浏览器操作')
   expect(text()).toContain('页面显示了已启用但尚无运行的空状态。')
-  const details = all('.dt-reporter-experiment details')
-  expect(details).toHaveLength(3)
-  expect(details.every(item => !(item as HTMLDetailsElement).open)).toBe(true)
-  expect(details[0]?.querySelector('summary')?.textContent).toBe(zh['reporter.experimentDetails'])
-  expect(all('.dt-reporter-finding details').every(item => !(item as HTMLDetailsElement).open)).toBe(true)
+  const details = all('.dt-reporter-details')
+  expect(details).toHaveLength(1)
+  expect(details[0]?.querySelector('summary')?.textContent).toBe(zh['reporter.runDetails'])
+  expect(details[0]?.querySelector('.dt-reporter-usage')?.textContent).toContain('1240')
+  expect(details[0]?.querySelector('.dt-reporter-finding details')?.querySelector('summary')?.textContent)
+    .toBe(zh['reporter.findingDetails'])
   expect(text()).toContain('错误反馈可能不够清楚')
   expect(text()).toContain('第 2 次用户动作收到通用失败反馈')
   expect(text()).toContain('提交一个无效请求')
@@ -200,8 +198,8 @@ it('labels browser actions separately from simulated user actions', async () => 
     { ...autonomousRun('browser', 'completed'), mode: 'browser' },
   ] }
   await mount()
-  expect(text()).toContain('浏览器动作 2')
-  expect(text()).not.toContain('用户动作 2')
+  expect(text()).toContain('浏览器动作2')
+  expect(text()).not.toContain('用户动作2')
 })
 
 it('labels completed, incomplete, failed and cancelled runs separately', async () => {
@@ -210,10 +208,27 @@ it('labels completed, incomplete, failed and cancelled runs separately', async (
     autonomousRun('cancelled', 'cancelled'),
   ] }
   await mount()
-  expect(all('.dt-reporter-run > .dt-row-main > .dt-row-meta:first-of-type').map(item => item.textContent)).toEqual([
-    `${zh['reporter.status.completed']}阶段：finished仿真和服务检查`, `${zh['reporter.status.incomplete']}阶段：finished仿真和服务检查`,
-    `${zh['reporter.status.failed']}阶段：finished仿真和服务检查`, `${zh['reporter.status.cancelled']}阶段：finished仿真和服务检查`,
+  expect(all('.dt-reporter-status').map(item => item.textContent)).toEqual([
+    zh['reporter.status.completed'], zh['reporter.status.incomplete'], zh['reporter.status.failed'], zh['reporter.status.cancelled'],
   ])
+})
+
+it('translates machine diagnostics into a readable reason and keeps the raw code in collapsed details', async () => {
+  const run = { ...autonomousRun('invalid', 'incomplete'), error_code: 'invalid_simulator_output',
+    summary: '请求已完成前置检查。; status=invalid_output; stop=invalid_output; actions=0; snapshot=true; outputs=0' }
+  server.reporter = { enabled: true, runs: [run] }
+  await mount()
+  const card = all('.dt-reporter-card')[0]!
+  expect(card.querySelector('.dt-reporter-reason')?.textContent).toContain('仿真用户生成的动作未通过检查，本轮没有继续测试。')
+  expect(card.querySelector('.dt-reporter-summary-preview')?.textContent).toBe('请求已完成前置检查。')
+  expect(card.querySelector('.dt-reporter-reason')?.textContent).not.toContain('invalid_simulator_output')
+  const details = card.querySelector<HTMLDetailsElement>('.dt-reporter-details')!
+  expect(details.open).toBe(false)
+  expect(details.querySelector('.dt-reporter-technical')?.textContent).toContain('invalid_simulator_output')
+  expect(details.querySelector('.dt-reporter-technical')?.textContent).toContain('status=invalid_output; stop=invalid_output')
+  await click(details.querySelector('summary')!)
+  expect(details.open).toBe(true)
+  expect(details.querySelector('.dt-reporter-technical')?.textContent).toContain('invalid_simulator_output')
 })
 
 it('lists the unavailable Evals one by one, without the health entry that counts them as a failure of dsh-superagent', async () => {

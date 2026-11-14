@@ -80,6 +80,10 @@ it('autonomously selects a simulation, performs two actions with real feedback, 
     model_usage: { prompt_tokens: 50, completion_tokens: 25, cost_usd: null, retries: null, completeness: 'partial' } })
   expect(terminal.scenario_ids).toEqual([`${initial.id}-e1`])
   expect(terminal.experiment_log[0]).toMatchObject({ kind: 'simulation', hypothesis: '检查只读请求是否被正确接单', evidence: expect.arrayContaining(['sequence:1:target_completed', 'sequence:2:target_completed']) })
+  const firstSimulatorRequest = requests.find(item => item.role === 'user-simulator')
+  expect(firstSimulatorRequest).toBeDefined()
+  expect((firstSimulatorRequest!.input as { scenario: { visible: { instructions: string[] } } }).scenario.visible.instructions.join('\n'))
+    .toContain('addressed: "mention"')
   expect(requests.find(item => item.role === 'user-simulator' && (item.input as { conversation: unknown[] }).conversation.length > 0)).toBeDefined()
   expect(JSON.stringify(requests.map(item => item.input))).not.toContain('oracle')
   expect(requests.find(item => item.role === 'qualitative-reviewer')?.input).not.toHaveProperty('oracle')
@@ -94,6 +98,26 @@ it('autonomously selects a simulation, performs two actions with real feedback, 
   expect(restored.get(initial.id)).toEqual(terminal)
   expect(await restored.start(request())).toEqual(terminal)
   expect(invoke).toHaveBeenCalledTimes(5)
+})
+
+it('persists safe Simulator schema paths when the model output is invalid', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  const invoke = vi.fn(async (input: ReporterModelRequest): Promise<ReporterModelResponse> => input.role === 'autonomous-explorer'
+    ? { output: { kind: 'simulation', hypothesis: '检查用户请求处理', goal: '只读分析入口并说明依据', persona: '仓库维护者' }, usage }
+    : input.role === 'user-simulator' ? { output: { kind: 'action', actor_id: 'alice', action: { kind: 'message', text: 'PRIVATE ACTION BODY', addressed: 'not-an-address' },
+      credential: 'PRIVATE CREDENTIAL' }, usage }
+      : { output: { summary: '审查完成。', findings: [] }, usage })
+  const host = fakeHost(directory, invoke), submit = vi.spyOn(host.reporter, 'submit')
+  const runs = new ReporterAutonomousRuns(host)
+  const initial = await runs.start(request())
+  const terminal = await waitTerminal(runs, initial.id)
+
+  expect(terminal).toMatchObject({ status: 'incomplete', error_code: 'invalid_simulator_output', turns: 0 })
+  const evidence = JSON.stringify(terminal.findings)
+  expect(evidence).toContain('schema:action.addressed:invalid_value')
+  expect(evidence).toContain('schema:$:unrecognized_keys')
+  expect(evidence).not.toMatch(/PRIVATE ACTION BODY|not-an-address|PRIVATE CREDENTIAL/)
+  expect(submit).not.toHaveBeenCalled()
 })
 
 it('shows the explorer only capabilities allowed by the selected mode', async () => {

@@ -334,8 +334,10 @@ export class ReporterAutonomousRuns {
           if (result.status !== 'completed') {
             const errorCode = result.error_code ?? result.stop_reason
             const invalidTest = isInvalidTestCode(errorCode)
+            const validationEvidence = result.validation_issues?.map(issue => `schema:${issue.path}:${issue.code}`) ?? []
             this.addFinding(view, { severity: 'warning', status: invalidTest ? 'invalid-test' : 'candidate',
-              title: invalidTest ? '仿真输入或动作未通过校验' : '仿真测试未完整结束', evidence: [evidence, errorCode], reproduction: [] })
+              title: invalidTest ? '仿真输入或动作未通过校验' : '仿真测试未完整结束', evidence: [evidence, errorCode, ...validationEvidence], reproduction: [] })
+            this.updateExperiment(record, logIndex, { evidence: [...view.experiment_log[logIndex]!.evidence, ...validationEvidence] })
             incompleteReason = errorCode
             break
           }
@@ -531,7 +533,9 @@ const EXPLORER_INSTRUCTIONS = `你是自主测试探索者。根据产品目标�
 const BROWSER_INSTRUCTIONS = `你是受限浏览器测试者。只基于当前 accessibility snapshot 验证可见页面；只能输出 JSON：{"kind":"observe"}、{"kind":"act","action":{"kind":"click","role":"button|tab","name":"控件无障碍名称"}}、{"kind":"act","action":{"kind":"fill","role":"textbox|searchbox|combobox","name":"控件无障碍名称","value":"文本"}}、{"kind":"act","action":{"kind":"press","role":"textbox|searchbox|combobox","name":"控件无障碍名称","key":"Enter|Escape|ArrowDown|ArrowUp|Space"}}、{"kind":"act","action":{"kind":"back"}}、{"kind":"act","action":{"kind":"snapshot"}} 或 {"kind":"finished","summary":"..."}。不得输出 URL、CSS selector、脚本、上传下载、提交、推送、外部消息、表单保存或任何会改变业务状态的动作。`
 function makeScenario(request: ReporterAutonomousRunRequest, id: string, actor: string, plan: Extract<z.infer<typeof ExploreDecisionSchema>, { kind: 'simulation' }>): ReporterScenarioDefinition {
   return { id, version: 1, project_source_id: request.project_source_id, thread_id: '1', thread_kind: 'issue', title: plan.hypothesis,
-    visible: { persona: plan.persona, goal: plan.goal, instructions: ['第一条消息应明确提出该只读分析目标并直接提及 Agent。只读分析，不修改文件，不提交或推送代码，不发送真实平台消息。'] },
+    visible: { persona: plan.persona, goal: plan.goal, instructions: [
+      '第一条用户动作必须是 kind 为 message 的动作，并显式设置 addressed: "mention"，同时在消息正文中直接提及 Agent；这只是 Reporter 的本地路由格式要求。只读分析，不修改文件，不提交或推送代码，不发送真实平台消息。',
+    ] },
     actors: [{ id: actor, role: 'person' }], oracle: { assertions: [{ kind: 'receive', sequence: 1, result: 'stored' }, { kind: 'decision', decision: 'accept', sequence: 1 }] },
     timeout_ms: request.budget.timeout_ms }
 }
