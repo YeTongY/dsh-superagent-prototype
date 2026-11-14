@@ -170,6 +170,12 @@ export class Sessions {
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
   /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
   relay(requestId: string, text: string): void { this.host.effects.enqueue('relay', requestId, { text }) }
+  /** 将一份 Reporter 终态报告作为内部消息送入 Orchestrator 主会话，并在 DSH 会话持久化后返回其身份。 */
+  async deliverReport(runId: string, text: string): Promise<string> {
+    if (!runId || runId.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(runId)) throw new Error('Invalid Reporter run ID')
+    await this.prompt(this.host.masterId, `reporter-run:${runId}`, text, 'steer')
+    return this.host.masterId
+  }
   /** Enqueues a durable background notice for injection into the main Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
   notify(name: string, value: Record<string, unknown>, summary: string): void { this.host.effects.enqueue('notice', name, { value, summary }) }
   /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached the main Session or `'pending'` if it is still queued. */

@@ -55,6 +55,28 @@ describe('DSH Reporter model binding', () => {
     expect(result.usage).not.toHaveProperty('retries')
   })
 
+  it('counts only non-empty text and reasoning deltas as model progress', async () => {
+    const stream: AsyncIterable<StreamChunk> = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: '   \n' }
+        yield { type: 'block-start', index: 1, blockType: 'reasoning' }
+        yield { type: 'reasoning-delta', index: 1, text: '\t ' }
+        yield { type: 'reasoning-delta', index: 1, text: '正在比较可见状态' }
+        yield { type: 'text-delta', index: 0, text: '{"ok":true}' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"ok":true}' } }
+        yield { type: 'block-end', index: 1, block: { type: 'reasoning', text: '正在比较可见状态' } }
+        yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    const fixture = host(stream), onProgress = vi.fn()
+    const invoke = createReporterModelInvoker(fixture.context, { provider: selected.provider, model: selected.model, reasoningEffort: 'medium' })
+
+    await expect(invoke({ ...request(), onProgress })).resolves.toMatchObject({ output: { ok: true } })
+    expect(onProgress).toHaveBeenCalledTimes(2)
+  })
+
   it('does not call the provider when already cancelled', async () => {
     const fixture = host()
     const controller = new AbortController()

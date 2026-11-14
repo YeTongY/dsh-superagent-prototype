@@ -3,6 +3,8 @@ import { z } from 'zod'
 import type { LocalReporter, ReporterReviewEvidence, ReporterScenarioResult, ReporterSimulatorFeedback, ReporterUsage } from './local-reporter.ts'
 import type { ReporterAction, ReporterOutputKind } from './protocol.ts'
 import { ReporterActionSchema } from './protocol.ts'
+import type { ReporterBrowserAction, ReporterBrowserObservation } from './browser.ts'
+import { ReporterProgressStalledError, ReporterProgressWatchdog } from './progress.ts'
 
 const SimulatorTurnSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('action'), actor_id: z.string().min(1).max(160), action: ReporterActionSchema,
@@ -21,10 +23,27 @@ export type ReporterModelRole = 'autonomous-explorer' | 'user-simulator' | 'brow
 interface ReporterModelRequestBase {
   instructions: string
   signal: AbortSignal
+  /** DSH stream calls this only for a non-empty model content/reasoning delta. */
+  onProgress?: () => void
   /** 尚未计量的最大预算；注入方可将它传给模型服务。 */
   remaining_budget: { cost_usd?: number; total_tokens?: number }
 }
-export interface ReporterExperimentEvidence { kind: 'simulation' | 'real-service' | 'browser'; hypothesis: string; observation: string; evidence: string[]; scenario_id?: string }
+export interface ReporterBrowserStep {
+  index: number
+  action: ReporterBrowserAction | 'initial-observation'
+  result: 'completed' | 'failed' | 'observed'
+  page: Pick<ReporterBrowserObservation, 'path' | 'title' | 'page_errors' | 'console_errors' | 'blocked_requests' | 'blocked_console_errors'>
+  error_code?: string
+  snapshot?: string
+}
+export interface ReporterExperimentEvidence {
+  kind: 'simulation' | 'real-service' | 'browser'
+  hypothesis: string
+  observation: string
+  evidence: string[]
+  scenario_id?: string
+  browser_steps?: ReporterBrowserStep[]
+}
 export interface ReporterExplorerInput {
   goal: string; mode: 'simulation' | 'real-service' | 'browser' | 'both'; permissions: { simulation: boolean; read_only_service: boolean; browser: boolean }
   remaining: { experiments: number; actions: number; model_calls: number; tokens: number }; capabilities: string[]
@@ -66,7 +85,7 @@ export interface ReporterModelUsageSummary {
 export interface ReporterSimulatorRunResult {
   scenario_id: string
   status: 'completed' | 'incomplete' | 'invalid_output' | 'input_rejected'
-  stop_reason: 'simulator_finished' | 'max_calls' | 'budget_exhausted' | 'usage_unknown' | 'timeout' | 'aborted' | 'invalid_output' | 'input_rejected'
+  stop_reason: 'simulator_finished' | 'max_calls' | 'budget_exhausted' | 'usage_unknown' | 'progress_stalled' | 'aborted' | 'invalid_output' | 'input_rejected'
   turns: number
   acknowledgements: ReturnType<LocalReporter['submit']>[]
   usage: ReporterModelUsageSummary
@@ -78,7 +97,7 @@ export interface ReporterSimulatorValidationIssue { path: string; code: string }
 export interface ReporterReviewerRunResult {
   scenario_id: string
   status: 'recorded' | 'invalid_output' | 'incomplete'
-  stop_reason: 'review_recorded' | 'budget_exhausted' | 'usage_unknown' | 'timeout' | 'aborted' | 'invalid_output'
+  stop_reason: 'review_recorded' | 'budget_exhausted' | 'usage_unknown' | 'progress_stalled' | 'aborted' | 'invalid_output'
   usage: ReporterModelUsageSummary
   report?: ReporterScenarioResult
 }
@@ -180,9 +199,6 @@ function checkedMaxTurns(input: number | undefined): number {
   return maxTurns
 }
 
-function runSignal(external: AbortSignal | undefined, timeoutMs: number): AbortSignal {
-  return AbortSignal.any([...(external ? [external] : []), AbortSignal.timeout(timeoutMs)])
-}
 function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise((resolve, reject) => {
@@ -191,8 +207,8 @@ function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
     operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
   })
 }
-function stopReason(signal: AbortSignal): 'timeout' | 'aborted' {
-  return signal.reason instanceof Error && signal.reason.name === 'TimeoutError' ? 'timeout' : 'aborted'
+function stopReason(signal: AbortSignal): 'progress_stalled' | 'aborted' {
+  return signal.reason instanceof ReporterProgressStalledError ? 'progress_stalled' : 'aborted'
 }
 function usageFrom(response: ReporterModelResponse): z.infer<typeof ModelUsageSchema> | undefined {
   if (response.usage === undefined) return undefined
@@ -210,13 +226,14 @@ function simulatorValidationIssues(error: z.ZodError): ReporterSimulatorValidati
 }
 
 async function invokeAndRecord(options: { invoke: ReporterModelInvoker; request: ReporterModelRequest; reporter: Pick<LocalReporter, 'recordUsage'>;
-  scenarioId: string; usage: Accumulator }): Promise<ReporterModelResponse> {
+  scenarioId: string; usage: Accumulator; onProgress?(): void }): Promise<ReporterModelResponse> {
   const { signal } = options.request
   signal.throwIfAborted()
   const started = Date.now()
   let response: ReporterModelResponse
   try {
-    response = await abortable(options.invoke(options.request), signal)
+    const forward = options.request.onProgress
+    response = await abortable(options.invoke({ ...options.request, onProgress: () => { options.onProgress?.(); forward?.() } }), signal)
   } catch (error) {
     // 已进入注入的模型调用边界；异常或超时时费用和 Token 数未知，不能记作零。
     applyUsage(options.usage, options.request.role, undefined, Date.now() - started, options.reporter, options.scenarioId)
@@ -234,11 +251,11 @@ export async function runUserSimulator(options: {
   reporter: Pick<LocalReporter, 'simulatorFeedback' | 'submit' | 'recordUsage' | 'completeScenario' | 'scenario'>
   scenarioId: string
   invoke: ReporterModelInvoker
-  waitForSuperagent(signal: AbortSignal): Promise<void>
+  waitForSuperagent(signal: AbortSignal, onProgress?: () => void): Promise<void>
   maxTurns?: number
   minTurns?: number
   validateAction?(action: ReporterAction, turn: number): boolean
-  onProgress?(progress: { phase: 'action_submitted' | 'target_waiting' | 'target_completed'; turns: number; sequence: number }): void
+  onProgress?(progress: { phase: 'model_stream' | 'model_call' | 'action_submitted' | 'target_waiting' | 'target_state' | 'target_completed'; turns: number; sequence: number }): void
   budget?: ReporterModelBudget
   signal?: AbortSignal
   now?: () => string
@@ -247,13 +264,23 @@ export async function runUserSimulator(options: {
   const minTurns = options.minTurns ?? 0
   if (!Number.isSafeInteger(minTurns) || minTurns < 0 || minTurns > maxTurns) throw new RangeError(`minTurns 必须是 0 到 ${maxTurns} 之间的整数`)
   const budget = checkedBudget(options.budget)
-  const signal = runSignal(options.signal, budget.timeout_ms ?? 120_000)
+  const watchdog = new ReporterProgressWatchdog(budget.timeout_ms ?? 600_000)
+  const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), watchdog.signal])
   const usage = accumulator(), acknowledgements: ReturnType<LocalReporter['submit']>[] = []
   const now = options.now ?? (() => new Date().toISOString())
   let turns = 0, offset = 0
   const finish = (status: ReporterSimulatorRunResult['status'], stop_reason: ReporterSimulatorRunResult['stop_reason'], report?: ReporterScenarioResult,
     error_code?: string): ReporterSimulatorRunResult => ({ scenario_id: options.scenarioId, status, stop_reason, turns, acknowledgements,
       usage: summary(usage), ...(report ? { report } : {}), ...(error_code ? { error_code } : {}) })
+  const emit = (phase: 'model_stream' | 'model_call' | 'action_submitted' | 'target_waiting' | 'target_state' | 'target_completed',
+    sequence = turns + 1, realProgress = true) => {
+    if (realProgress) watchdog.pulse()
+    options.onProgress?.({ phase, turns, sequence })
+  }
+  const waitForTarget = async (sequence: number) => {
+    await abortable(options.waitForSuperagent(signal, () => emit('target_state', sequence)), signal)
+    emit('target_completed', sequence)
+  }
   try {
     let feedback = options.reporter.simulatorFeedback(options.scenarioId)
     if (!feedback) return finish('incomplete', 'input_rejected', undefined, 'scenario_not_found')
@@ -263,10 +290,13 @@ export async function runUserSimulator(options: {
       if (budget.max_calls !== undefined && usage.calls >= budget.max_calls) {
         return finish('incomplete', 'max_calls', options.reporter.scenario(options.scenarioId))
       }
+      const responseSequence = feedback.last_sequence + 1
       const response = await invokeAndRecord({ invoke: options.invoke, reporter: options.reporter, scenarioId: options.scenarioId, usage,
         request: { role: 'user-simulator', instructions: SIMULATOR_INSTRUCTIONS + (turns < minTurns
           ? ` 当前已完成 ${turns} 次用户动作；在达到至少 ${minTurns} 次真实用户动作并观察目标回复前，不得结束。` : ''),
-          input: feedback, signal, remaining_budget: remainingBudget(usage, budget) } })
+          input: feedback, signal, remaining_budget: remainingBudget(usage, budget) },
+        onProgress: () => emit('model_stream', responseSequence) })
+      emit('model_call', responseSequence)
       if (requiredBudgetUnknown(usage, budget)) return finish('incomplete', 'usage_unknown', options.reporter.scenario(options.scenarioId))
       if (budgetExceeded(usage, budget)) { return finish('incomplete', 'budget_exhausted', options.reporter.scenario(options.scenarioId)) }
 
@@ -275,7 +305,7 @@ export async function runUserSimulator(options: {
         validation_issues: simulatorValidationIssues(parsed.error) }
       if (parsed.data.kind === 'finished') {
         if (turns < minTurns) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'simulator_finished_too_early')
-        await abortable(options.waitForSuperagent(signal), signal)
+        await waitForTarget(feedback.last_sequence)
         return finish('completed', 'simulator_finished', options.reporter.completeScenario(options.scenarioId))
       }
       if (options.validateAction && !options.validateAction(parsed.data.action, turns)) {
@@ -292,10 +322,9 @@ export async function runUserSimulator(options: {
         return finish('input_rejected', 'input_rejected', options.reporter.scenario(options.scenarioId), code)
       }
       turns++
-      options.onProgress?.({ phase: 'action_submitted', turns, sequence: envelope.sequence })
-      options.onProgress?.({ phase: 'target_waiting', turns, sequence: envelope.sequence })
-      await abortable(options.waitForSuperagent(signal), signal)
-      options.onProgress?.({ phase: 'target_completed', turns, sequence: envelope.sequence })
+      emit('action_submitted', envelope.sequence)
+      emit('target_waiting', envelope.sequence, false)
+      await waitForTarget(envelope.sequence)
       const nextFeedback = options.reporter.simulatorFeedback(options.scenarioId)
       if (!nextFeedback) return finish('incomplete', 'input_rejected', options.reporter.scenario(options.scenarioId), 'scenario_not_found')
       feedback = nextFeedback
@@ -308,7 +337,7 @@ export async function runUserSimulator(options: {
     const errorCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code
       : error instanceof Error && error.message === 'model_call_failed' ? 'model_call_failed' : 'target_wait_failed'
     return finish('incomplete', 'input_rejected', options.reporter.scenario(options.scenarioId), errorCode)
-  }
+  } finally { watchdog.dispose() }
 }
 
 /** Reviewer 只收到安全 reviewEvidence，并只返回定性文字；严格 schema 不接受任何 Oracle/pass 覆盖字段。 */
@@ -316,11 +345,11 @@ export async function runQualitativeReviewer(options: {
   reporter: Pick<LocalReporter, 'reviewEvidence' | 'recordReview' | 'recordUsage' | 'scenario'>
   scenarioId: string
   invoke: ReporterModelInvoker
+  onProgress?(progress: { phase: 'model_stream' | 'model_call' }): void
   budget?: ReporterModelBudget
   signal?: AbortSignal
 }): Promise<ReporterReviewerRunResult> {
   const budget = checkedBudget(options.budget)
-  const signal = runSignal(options.signal, budget.timeout_ms ?? 120_000)
   const usage = accumulator()
   const finish = (status: ReporterReviewerRunResult['status'], stop_reason: ReporterReviewerRunResult['stop_reason'], report?: ReporterScenarioResult): ReporterReviewerRunResult =>
     ({ scenario_id: options.scenarioId, status, stop_reason, usage: summary(usage), ...(report ? { report } : {}) })
@@ -328,9 +357,13 @@ export async function runQualitativeReviewer(options: {
   if (!evidence) return finish('incomplete', 'invalid_output')
   if (budget.max_calls === 0) return finish('incomplete', 'budget_exhausted', options.reporter.scenario(options.scenarioId))
   if (budgetDepleted(usage, budget)) return finish('incomplete', 'budget_exhausted', options.reporter.scenario(options.scenarioId))
+  const watchdog = new ReporterProgressWatchdog(budget.timeout_ms ?? 600_000)
+  const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), watchdog.signal])
   try {
     const response = await invokeAndRecord({ invoke: options.invoke, reporter: options.reporter, scenarioId: options.scenarioId, usage,
-      request: { role: 'qualitative-reviewer', instructions: REVIEWER_INSTRUCTIONS, input: evidence, signal, remaining_budget: remainingBudget(usage, budget) } })
+      request: { role: 'qualitative-reviewer', instructions: REVIEWER_INSTRUCTIONS, input: evidence, signal, remaining_budget: remainingBudget(usage, budget) },
+      onProgress: () => { watchdog.pulse(); options.onProgress?.({ phase: 'model_stream' }) } })
+    watchdog.pulse(); options.onProgress?.({ phase: 'model_call' })
     if (requiredBudgetUnknown(usage, budget)) return finish('incomplete', 'usage_unknown', options.reporter.scenario(options.scenarioId))
     if (budgetExceeded(usage, budget)) return finish('incomplete', 'budget_exhausted', options.reporter.scenario(options.scenarioId))
     const parsed = ReviewerOutputSchema.safeParse(response.output)
@@ -339,7 +372,7 @@ export async function runQualitativeReviewer(options: {
   } catch (error) {
     if (signal.aborted) return finish('incomplete', stopReason(signal), options.reporter.scenario(options.scenarioId))
     return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId))
-  }
+  } finally { watchdog.dispose() }
 }
 
 export type { ReporterAction, ReporterOutputKind }

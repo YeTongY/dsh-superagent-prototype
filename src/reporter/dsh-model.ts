@@ -60,7 +60,10 @@ export function createReporterModelInvoker(ctx: Context, route: ReporterModelRou
     try {
       const stream = ctx.llm.stream({ provider: route.provider, model: route.model,
         reasoningEffort: ReasoningEffortId('medium'), messages, maxTokens, signal: request.signal })
-      for await (const chunk of stream) assembler.push(chunk)
+      for await (const chunk of stream) {
+        assembler.push(chunk)
+        if ((chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') && chunk.text.trim().length > 0) request.onProgress?.()
+      }
     } catch {
       throw new ReporterModelError(request.signal.aborted ? 'reporter_model_aborted' : 'reporter_model_failed')
     }

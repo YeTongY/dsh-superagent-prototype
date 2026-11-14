@@ -49,7 +49,7 @@ export interface HttpHost {
   /** 仅显式测试配置挂载；capability 不进入任何管理视图。 */
   readonly reporter?: { client: LocalReporter; token: string }
   /** Persistent autonomous Reporter runs; absent when the testing-only Reporter is disabled. */
-  readonly reporterRuns?: Pick<ReporterAutonomousRuns, 'start' | 'list' | 'get' | 'cancel'>
+  readonly reporterRuns?: Pick<ReporterAutonomousRuns, 'start' | 'list' | 'get' | 'cancel' | 'retryReport'>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
@@ -283,6 +283,9 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
             }
             if (req.method === 'POST' && path.length === 3 && path[2] === 'cancel') {
               json(res, 200, runs.cancel(path[1]!)); return
+            }
+            if (req.method === 'POST' && path.length === 3 && path[2] === 'report') {
+              json(res, 200, await runs.retryReport(path[1]!)); return
             }
           }
           if (req.method === 'POST' && path.length === 3 && path[0] === 'scenarios') {

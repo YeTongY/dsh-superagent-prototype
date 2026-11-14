@@ -304,6 +304,7 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/reporter/protocol.ts` | 严格场景与动作协议、隐藏 Oracle 和运行时快照类型 |
 | `src/reporter/local-reporter.ts` | 输入日志、幂等恢复、本地输出、checkpoint、Oracle 和无模型回放 |
 | `src/reporter/autonomous.ts` | 有界自主测试运行、模型预算、场景选择、证据和终态持久化 |
+| `src/reporter/progress.ts` | Reporter 真实活动信号与连续无进展 watchdog |
 | `src/reporter/browser.ts` | 受限的 loopback 管理页浏览器观察与语义动作 |
 | `src/reporter/dsh-model.ts` | 复用 DSH 原生模型路由和每次调用的 `medium` 推理等级 |
 | `src/client/reporter-status.tsx` | 只读展示自主 Reporter 进度、用量、实验和发现 |

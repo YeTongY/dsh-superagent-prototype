@@ -14,7 +14,7 @@ const definitions = (id = 'coordinator-scenario') => ({ id, version: 1, project_
   oracle: { assertions: [{ kind: 'ticket-count', count: 9 }] } })
 
 let directories: string[] = []
-afterEach(() => { for (const directory of directories) rmSync(directory, { recursive: true, force: true }); directories = [] })
+afterEach(() => { vi.useRealTimers(); for (const directory of directories) rmSync(directory, { recursive: true, force: true }); directories = [] })
 
 function createReporter(): LocalReporter {
   const stateDir = mkdtempSync(join(tmpdir(), 'reporter-coordinator-'))
@@ -104,7 +104,7 @@ it('stops before submitting a generated action when required model cost is unkno
   expect(reporter.scenario('coordinator-scenario')?.usage[0]).toMatchObject({ role: 'user-simulator', latency_ms: expect.any(Number) })
 })
 
-it('does not invoke a fake Simulator after cancellation and records timed-out calls with unknown cost', async () => {
+it('does not invoke a fake Simulator after cancellation and marks a stalled model call with unknown cost', async () => {
   const cancelledReporter = createReporter(), cancelled = new AbortController(), cancelledInvoke = vi.fn(async () => actionResponse)
   cancelled.abort()
   const cancelledResult = await runUserSimulator({ reporter: cancelledReporter, scenarioId: 'coordinator-scenario', invoke: cancelledInvoke,
@@ -113,12 +113,51 @@ it('does not invoke a fake Simulator after cancellation and records timed-out ca
   expect(cancelledResult).toMatchObject({ stop_reason: 'aborted', usage: { calls: 0, cost_usd: null } })
   expect(cancelledInvoke).not.toHaveBeenCalled()
 
+  vi.useFakeTimers()
   const timeoutReporter = createReporter(), timeoutInvoke: ReporterModelInvoker = async () => new Promise(() => {})
-  const timeoutResult = await runUserSimulator({ reporter: timeoutReporter, scenarioId: 'coordinator-scenario', invoke: timeoutInvoke,
+  const pending = runUserSimulator({ reporter: timeoutReporter, scenarioId: 'coordinator-scenario', invoke: timeoutInvoke,
     waitForSuperagent: async () => {}, budget: { max_cost_usd: 1, timeout_ms: 20 } })
+  await vi.advanceTimersByTimeAsync(20)
+  const timeoutResult = await pending
 
-  expect(timeoutResult).toMatchObject({ stop_reason: 'timeout', usage: { calls: 1, cost_usd: null } })
+  expect(timeoutResult).toMatchObject({ stop_reason: 'progress_stalled', usage: { calls: 1, cost_usd: null } })
   expect(timeoutReporter.scenario('coordinator-scenario')?.usage[0]).toMatchObject({ role: 'user-simulator', latency_ms: expect.any(Number) })
+})
+
+it('keeps a slow Simulator alive across multiple inactivity windows with model and target progress', async () => {
+  vi.useFakeTimers()
+  const reporter = createReporter()
+  let calls = 0, targetWaits = 0
+  const invoke: ReporterModelInvoker = vi.fn(async request => {
+    calls++
+    if (calls === 1) await new Promise<void>(resolve => {
+      let ticks = 0
+      const timer = setInterval(() => {
+        request.onProgress?.()
+        if (++ticks === 2) { clearInterval(timer); resolve() }
+      }, 90_000)
+    })
+    return calls === 1 ? actionResponse : finishResponse
+  })
+  const waitForSuperagent = async (_signal: AbortSignal, onProgress?: () => void) => {
+    targetWaits++
+    if (targetWaits > 1) return
+    await new Promise<void>(resolve => {
+      let ticks = 0
+      const timer = setInterval(() => {
+        onProgress?.()
+        if (++ticks === 4) { clearInterval(timer); resolve() }
+      }, 90_000)
+    })
+  }
+  const pending = runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent,
+    maxTurns: 2, minTurns: 1, budget: { max_calls: 2, max_total_tokens: 1_000, timeout_ms: 120_000 } })
+  await vi.advanceTimersByTimeAsync(600_000)
+  const result = await pending
+
+  expect(result).toMatchObject({ status: 'completed', stop_reason: 'simulator_finished', turns: 1 })
+  expect(calls).toBe(2)
+  expect(targetWaits).toBe(2)
 })
 
 it('rejects extra Simulator output fields before submitting an action', async () => {

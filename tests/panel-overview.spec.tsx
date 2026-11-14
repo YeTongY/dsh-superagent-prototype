@@ -142,6 +142,7 @@ const autonomousRun = (id: string, status: ReporterAutonomousRunView['status'], 
   phase: status === 'running' ? 'simulation' : 'finished', started_at: '2026-11-14T00:00:00.000Z', updated_at: '2026-11-14T00:01:00.000Z',
   model: { provider: 'host', model: 'reporter-model', reasoningEffort: 'medium' }, experiments: 1, turns: 2, model_calls: 4,
   model_usage: { prompt_tokens: 1_240, completion_tokens: 320, cost_usd: null, latency_ms: 4200, retries: null, completeness: 'partial' },
+  report_delivery: { status: 'pending' },
   scenario_ids: ['auto-scenario-1'], experiment_log: [
     { kind: 'simulation', hypothesis: '一条简短的产品请求可能让目标先确认需求。',
       observation: 'Superagent 已针对第一次请求创建并返回本地工单确认。', evidence: ['输入序号 1', '目标回复序号 2'], scenario_id: 'auto-scenario-1' },
@@ -200,6 +201,119 @@ it('labels browser actions separately from simulated user actions', async () => 
   await mount()
   expect(text()).toContain('浏览器动作2')
   expect(text()).not.toContain('用户动作2')
+})
+
+it('shows structured browser actions and outcomes in order without exposing page snapshots', async () => {
+  const run = autonomousRun('browser-steps', 'incomplete')
+  run.mode = 'browser'
+  run.experiment_log = [{
+    kind: 'browser', hypothesis: '确认页签切换和表单反馈',
+    observation: '浏览器执行 3 步：成功控件操作 1 次，页面观察 1 次，动作失败 1 次。', evidence: [],
+    browser_steps: [
+      { index: 1, action: 'initial-observation', result: 'observed', page: { path: '/', title: '概览', page_errors: 0,
+        console_errors: 1, blocked_requests: [], blocked_console_errors: 0 }, snapshot: '原始页面快照不得出现在此处' },
+      { index: 2, action: { kind: 'click', role: 'tab', name: '设置' }, result: 'completed', page: { path: '/settings', title: '来源设置',
+        page_errors: 0, console_errors: 2, blocked_requests: [{ method: 'POST', pathname: '/api/blocked' }], blocked_console_errors: 1 },
+        snapshot: '原始设置页快照不得出现在此处' },
+      { index: 3, action: { kind: 'fill', role: 'textbox', name: '项目路径', value: 'team/private' }, result: 'failed', error_code: 'browser_action_failed',
+        page: { path: '/settings', title: '来源设置', page_errors: 1, console_errors: 3, blocked_requests: [], blocked_console_errors: 0 } },
+    ],
+  }]
+  server.reporter = { enabled: true, runs: [run] }
+  await mount()
+  await click(all('.dt-reporter-details summary')[0]!)
+
+  const steps = all('.dt-reporter-browser-step')
+  expect(steps).toHaveLength(3)
+  expect(steps.map(step => step.getAttribute('data-result'))).toEqual(['observed', 'completed', 'failed'])
+  expect(steps[0]?.textContent).toContain('观察初始页面')
+  expect(steps[0]?.textContent).toContain('页面：概览（/）')
+  expect(steps[1]?.textContent).toContain('切换到页签“设置”')
+  expect(steps[1]?.textContent).toContain('已完成')
+  expect(steps[1]?.textContent).toContain('页面：来源设置（/settings）')
+  expect(steps[1]?.textContent).toContain('控制台错误 2')
+  expect(steps[1]?.textContent).toContain('拦截请求 1')
+  expect(steps[2]?.textContent).toContain('在“项目路径”输入内容')
+  expect(steps[2]?.textContent).toContain('browser_action_failed')
+  expect(text()).not.toContain('原始页面快照不得出现在此处')
+  expect(text()).not.toContain('team/private')
+})
+
+it('opens only the real delivered main Session for the full native DSH report', async () => {
+  server.reporter = { enabled: true, runs: [
+    { ...autonomousRun('delivered', 'completed'), report_delivery: { status: 'delivered', master_session_id: 'main-session-real' } },
+    { ...autonomousRun('missing-session', 'completed'), report_delivery: { status: 'delivered' } },
+    { ...autonomousRun('failed', 'failed'), report_delivery: { status: 'failed', error_code: 'report_delivery_failed' } },
+    { ...autonomousRun('pending', 'completed'), report_delivery: { status: 'pending', master_session_id: 'must-not-open' } },
+  ] }
+  await mount()
+  const delivered = all('.dt-reporter-card').find(card => card.querySelector('.dt-reporter-delivery[data-state="delivered"]'))!
+  const missingSession = all('.dt-reporter-card').find(card => card.querySelector('.dt-reporter-delivery[data-state="delivered"]')
+    && card.textContent?.includes('missing-session'))!
+  const failed = all('.dt-reporter-card').find(card => card.textContent?.includes('未能送达'))!
+  const pending = all('.dt-reporter-card').find(card => card.textContent?.includes('等待送达'))!
+  const openButton = delivered.querySelector<HTMLButtonElement>('.dt-reporter-delivery button')!
+  expect(openButton.textContent).toContain('在 DSH 中查看报告')
+  expect(missingSession.querySelector('.dt-reporter-delivery button')).toBeNull()
+  expect(failed.querySelector('.dt-reporter-delivery button')).toBeNull()
+  expect(pending.querySelector('.dt-reporter-delivery button')).toBeNull()
+  await click(openButton)
+  expect(server.opened).toEqual(['main-session-real'])
+})
+
+it('shows the latest real progress timestamp and localized progress kind', async () => {
+  const kinds = [
+    ['model_stream', '模型输出'],
+    ['model_call', '模型调用完成'],
+    ['user_action', '用户动作完成'],
+    ['target_state', '目标状态变化'],
+    ['service_probe', '服务检查完成'],
+    ['browser_observation', '已观察页面'],
+    ['browser_action', '浏览器操作完成'],
+  ] as const
+  const runs = kinds.map(([kind], index) => {
+    const run = autonomousRun(`progress-${kind}`, 'running')
+    run.progress = { at: `2026-11-14T00:00:0${index}.000Z`, kind }
+    return run
+  })
+  server.reporter = { enabled: true, runs }
+  await mount()
+
+  const progress = all('.dt-reporter-last-progress')
+  expect(progress).toHaveLength(kinds.length)
+  expect(progress.map(item => item.querySelector('span')?.textContent)).toEqual(kinds.map(() => zh['reporter.lastRealProgress']))
+  expect(progress.map(item => item.querySelector('strong')?.textContent)).toEqual(kinds.map(([, label]) => label))
+  expect(progress.map(item => item.querySelector('time')?.getAttribute('datetime'))).toEqual(
+    kinds.map((_, index) => `2026-11-14T00:00:0${index}.000Z`))
+})
+
+it('explains stalled progress separately from a legacy run timeout', async () => {
+  const stalled = { ...autonomousRun('stalled', 'incomplete'), error_code: 'progress_stalled' }
+  const legacyTimeout = { ...autonomousRun('legacy-timeout', 'incomplete'), error_code: 'run_timeout' }
+  server.reporter = { enabled: true, runs: [stalled, legacyTimeout] }
+  await mount()
+
+  const reasons = all('.dt-reporter-card').map(card => card.querySelector('.dt-reporter-reason')?.textContent)
+  expect(reasons[0]).toContain('持续未观察到真实进展，已保留证据。')
+  expect(reasons[1]).toContain('运行超过时限，报告者已停止后续操作。')
+  expect(reasons[0]).not.toBe(reasons[1])
+})
+
+it('keeps legacy browser JSON out of the readable observation and retains it only as local diagnostics', async () => {
+  const raw = '{"path":"/","title":"概览","accessibility_snapshot":"button 打开工单","page_errors":0,"blocked_requests":[]}'
+  const run = autonomousRun('legacy-browser', 'completed')
+  run.experiment_log = [{ kind: 'browser', hypothesis: '核对概览页', observation: `初始页面观察：${raw}`,
+    evidence: [`初始页面观察：${raw}`] }]
+  server.reporter = { enabled: true, runs: [run] }
+  await mount()
+  const experiment = document.querySelector<HTMLElement>('.dt-reporter-experiment')!
+  const observation = experiment.querySelectorAll('p')[1]!
+  expect(observation.textContent).toContain(zh['reporter.legacyBrowserObservation'])
+  expect(observation.textContent).not.toContain('accessibility_snapshot')
+  const diagnostics = [...experiment.querySelectorAll<HTMLDetailsElement>('.dt-reporter-legacy-diagnostic')]
+  expect(diagnostics).toHaveLength(2)
+  expect(diagnostics.every(item => !item.open)).toBe(true)
+  expect(diagnostics[0]?.querySelector('pre')?.textContent).toContain('accessibility_snapshot')
 })
 
 it('labels completed, incomplete, failed and cancelled runs separately', async () => {

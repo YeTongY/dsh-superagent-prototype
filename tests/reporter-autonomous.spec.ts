@@ -3,17 +3,17 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReporterAutonomousRuns, type ReporterAutonomousHost } from '../src/reporter/autonomous.ts'
-import type { ReporterModelRequest, ReporterModelResponse } from '../src/reporter/coordinator.ts'
+import type { ReporterModelInvoker, ReporterModelRequest, ReporterModelResponse } from '../src/reporter/coordinator.ts'
 import type { ReporterScenarioDefinition, ReporterEnvelope } from '../src/reporter/protocol.ts'
 import { ReporterBrowserError, type ReporterBrowserDriver, type ReporterBrowserObservation } from '../src/reporter/browser.ts'
 
 const directories: string[] = []
-afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
+afterEach(() => { vi.useRealTimers(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
 
 const request = (overrides: Record<string, unknown> = {}) => ({ idempotency_key: 'autonomous-test-1', goal: '检查产品在只读分析请求下的真实行为',
   project_source_id: 'github', mode: 'simulation', permissions: { simulation: true }, ...overrides })
 const usage = { model: 'gpt-6.1-sol', prompt_tokens: 10, completion_tokens: 5 }
-const scenarioResult = (id: string, inputs: ReporterEnvelope[], outputs: { kind: string; text: string; id: string; at: string }[], review?: unknown) => ({
+const scenarioResult = (id: string, inputs: ReporterEnvelope[], outputs: { kind: string; text: string; id: string; at: string; sequence: number }[], review?: unknown) => ({
   scenario_id: id, scenario_version: 1, status: 'completed', behavioral_pass: true, platform_pass: null, delivery_pass: null,
   coverage: { behavior: 'local-engine', platform: 'not-run', delivery: 'local-sink' }, simulator: {}, inputs: inputs.map((envelope, index) => ({ envelope,
     trigger: { id: `trigger-${index + 1}`, text: (envelope.action as { text?: string }).text ?? '动作' }, ack: { disposition: 'stored' }, recorded_at: '2026-11-14T00:00:00.000Z' })),
@@ -23,7 +23,7 @@ const scenarioResult = (id: string, inputs: ReporterEnvelope[], outputs: { kind:
 
 function fakeHost(directory: string, invoke: ReporterAutonomousHost['resolveModel'] extends () => Promise<infer T> ? T extends { invoke: infer I } ? I : never : never): ReporterAutonomousHost {
   let definition: ReporterScenarioDefinition | undefined
-  const inputs: ReporterEnvelope[] = [], outputs: { kind: string; text: string; id: string; at: string }[] = []
+  const inputs: ReporterEnvelope[] = [], outputs: { kind: string; text: string; id: string; at: string; sequence: number }[] = []
   let review: unknown
   const result = (id: string) => scenarioResult(id, inputs, outputs, review) as never
   const client = {
@@ -43,8 +43,10 @@ function fakeHost(directory: string, invoke: ReporterAutonomousHost['resolveMode
   return { reporter: client as never, enabled: true, resolveProject: id => id === 'github' ? { id, provider: 'github', host: 'github.com', project: 'acme/widgets' } : undefined,
     allowedActors: () => ['alice'], safeState: () => ({ health: { runtime: 'ready' }, open_tickets: 0 }),
     resolveModel: async () => ({ provider: 'codex-custom', model: 'gpt-6.1-sol', invoke }),
-    waitForSuperagent: async (_scenarioId, signal) => { signal.throwIfAborted(); outputs.push({ id: `reply-${outputs.length + 1}`, kind: 'reply',
-      text: '我已只读检查仓库并整理依据。', at: new Date().toISOString() }) },
+    deliverReport: vi.fn(async () => ({ masterSessionId: 'main-session-from-host' })),
+    waitForSuperagent: async (_scenarioId, signal) => { signal.throwIfAborted(); const sequence = inputs.length
+      if (!outputs.some(output => output.sequence === sequence)) outputs.push({ id: `reply-${outputs.length + 1}`, kind: 'reply', sequence,
+        text: '我已只读检查仓库并整理依据。', at: new Date().toISOString() }) },
     probeReadOnly: async probe_id => ({ probe_id, status: 200, body: '{"ready":true}', json: true }),
     lifetime: new AbortController().signal, stateDir: directory }
 }
@@ -52,11 +54,90 @@ function fakeHost(directory: string, invoke: ReporterAutonomousHost['resolveMode
 async function waitTerminal(runs: ReporterAutonomousRuns, id: string) {
   for (let i = 0; i < 100; i++) {
     const current = runs.get(id)!
-    if (current.status !== 'running') return current
+    if (current.status !== 'running' && current.report_delivery.status !== 'pending') return current
     await new Promise(resolve => setTimeout(resolve, 0))
   }
   throw new Error('Reporter run did not settle')
 }
+async function waitRunStopped(runs: ReporterAutonomousRuns, id: string) {
+  for (let i = 0; i < 100; i++) {
+    const current = runs.get(id)!
+    if (current.status !== 'running') return current
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  throw new Error('Reporter run did not stop')
+}
+
+it('keeps simulation active across multiple inactivity windows while the target reports real state progress', async () => {
+  vi.useFakeTimers()
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  let simulatorCalls = 0
+  const invoke: ReporterModelInvoker = vi.fn(async (input: ReporterModelRequest): Promise<ReporterModelResponse> => {
+    if (input.role === 'autonomous-explorer') return { output: { kind: 'simulation', hypothesis: '验证真实目标反馈等待',
+      goal: '只读检查登录入口并说明依据', persona: '仓库维护者，等待逐步检查结果。' }, usage }
+    if (input.role === 'user-simulator') {
+      simulatorCalls++
+      if (simulatorCalls === 3) return { output: { kind: 'finished', summary: '已观察两轮真实目标回复。' }, usage }
+      await new Promise<void>(resolve => {
+        let ticks = 0
+        const timer = setInterval(() => {
+          input.onProgress?.()
+          if (++ticks === 2) { clearInterval(timer); resolve() }
+        }, 90_000)
+      })
+      return { output: { kind: 'action', actor_id: 'alice', action: { kind: 'message', ...(simulatorCalls === 1 ? { addressed: 'mention' as const } : {}),
+        text: simulatorCalls === 1 ? '请只读检查登录入口并说明依据。' : '请补充刚才的具体依据。' } }, usage }
+    }
+    return { output: { summary: '两轮目标回复均已记录。', findings: [] }, usage }
+  })
+  const host = fakeHost(directory, invoke)
+  const completeTarget = host.waitForSuperagent
+  let waits = 0
+  host.waitForSuperagent = async (_scenarioId, signal, onProgress) => {
+    if (++waits <= 2) {
+      await new Promise<void>((resolve, reject) => {
+        let ticks = 0
+        const timer = setInterval(() => {
+          signal.throwIfAborted()
+          onProgress?.()
+          if (++ticks === 2) { clearInterval(timer); resolve() }
+        }, 90_000)
+        signal.addEventListener('abort', () => { clearInterval(timer); reject(signal.reason) }, { once: true })
+      })
+    }
+    await completeTarget(_scenarioId, signal)
+  }
+  const runs = new ReporterAutonomousRuns(host)
+  const initial = await runs.start(request({ budget: { max_model_calls: 8, max_actions: 4, max_experiments: 1, max_total_tokens: 20_000, timeout_ms: 120_000 } }))
+  await vi.advanceTimersByTimeAsync(750_000)
+  const terminal = runs.get(initial.id)!
+
+  expect(Date.now() - Date.parse(initial.started_at)).toBeGreaterThan(600_000)
+  expect(terminal).toMatchObject({ status: 'completed', turns: 2, progress: { kind: 'model_call' } })
+  expect(simulatorCalls).toBe(3)
+  expect(waits).toBe(3)
+})
+
+it('stops an autonomous run after a real no-progress window and keeps cancellation distinct', async () => {
+  vi.useFakeTimers()
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  const stalledInvoke: ReporterModelInvoker = request => new Promise((_resolve, reject) => {
+    request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true })
+  })
+  const stalledHost = fakeHost(directory, stalledInvoke), stalledRuns = new ReporterAutonomousRuns(stalledHost)
+  const stalled = await stalledRuns.start(request({ mode: 'real-service', permissions: { read_only_service: true },
+    budget: { max_model_calls: 8, max_actions: 4, max_experiments: 1, max_total_tokens: 20_000, timeout_ms: 5_000 } }))
+  await vi.advanceTimersByTimeAsync(5_000)
+  expect(stalledRuns.get(stalled.id)).toMatchObject({ status: 'incomplete', error_code: 'progress_stalled', report_delivery: { status: 'delivered' } })
+
+  const ignoredAbortInvoke: ReporterModelInvoker = () => new Promise(() => {})
+  const cancelHost = fakeHost(directory, ignoredAbortInvoke), cancelRuns = new ReporterAutonomousRuns(cancelHost)
+  const cancelled = await cancelRuns.start(request({ idempotency_key: 'autonomous-cancel-now', mode: 'real-service', permissions: { read_only_service: true },
+    budget: { max_model_calls: 8, max_actions: 4, max_experiments: 1, max_total_tokens: 20_000, timeout_ms: 5_000 } }))
+  cancelRuns.cancel(cancelled.id)
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+  expect(cancelRuns.get(cancelled.id)).toMatchObject({ status: 'cancelled', report_delivery: { status: 'delivered' } })
+})
 
 it('autonomously selects a simulation, performs two actions with real feedback, reviews it and keeps completed idempotency', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
@@ -77,7 +158,8 @@ it('autonomously selects a simulation, performs two actions with real feedback, 
   const terminal = await waitTerminal(runs, initial.id)
   expect(terminal).toMatchObject({ status: 'completed', mode: 'simulation', experiments: 1, turns: 2, model_calls: 5,
     model: { provider: 'codex-custom', model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
-    model_usage: { prompt_tokens: 50, completion_tokens: 25, cost_usd: null, retries: null, completeness: 'partial' } })
+    model_usage: { prompt_tokens: 50, completion_tokens: 25, cost_usd: null, retries: null, completeness: 'partial' },
+    report_delivery: { status: 'delivered', master_session_id: 'main-session-from-host' } })
   expect(terminal.scenario_ids).toEqual([`${initial.id}-e1`])
   expect(terminal.experiment_log[0]).toMatchObject({ kind: 'simulation', hypothesis: '检查只读请求是否被正确接单', evidence: expect.arrayContaining(['sequence:1:target_completed', 'sequence:2:target_completed']) })
   const firstSimulatorRequest = requests.find(item => item.role === 'user-simulator')
@@ -88,6 +170,15 @@ it('autonomously selects a simulation, performs two actions with real feedback, 
   expect(JSON.stringify(requests.map(item => item.input))).not.toContain('oracle')
   expect(requests.find(item => item.role === 'qualitative-reviewer')?.input).not.toHaveProperty('oracle')
   expect(host.reporter.recordUsage).toHaveBeenCalledTimes(4)
+  expect(host.deliverReport).toHaveBeenCalledOnce()
+  const delivery = vi.mocked(host.deliverReport)
+  const delivered = delivery.mock.calls[0]![0]
+  expect(delivered).toMatchObject({ runId: initial.id, report: { run_id: initial.id, status: 'completed', findings: terminal.findings,
+    experiments: [expect.objectContaining({ oracle_status: 'passed', public_transcript: expect.arrayContaining([
+      expect.objectContaining({ role: 'actor', sequence: 1 }), expect.objectContaining({ role: 'superagent', sequence: 1 }),
+    ]) })] } })
+  expect(delivered.report.experiments[0]?.public_transcript?.map(message => message.role)).toEqual(['actor', 'superagent', 'actor', 'superagent'])
+  expect(JSON.stringify(delivered.report)).not.toContain('assertion')
 
   const duplicate = await runs.start(request())
   expect(duplicate).toEqual(terminal)
@@ -98,6 +189,81 @@ it('autonomously selects a simulation, performs two actions with real feedback, 
   expect(restored.get(initial.id)).toEqual(terminal)
   expect(await restored.start(request())).toEqual(terminal)
   expect(invoke).toHaveBeenCalledTimes(5)
+})
+
+it('retries a persisted terminal pending report on restart without restarting the test run', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  const invoke = vi.fn(async () => ({ output: { kind: 'finished', summary: '只读管理检查已结束。' }, usage }))
+  const firstHost = fakeHost(directory, invoke)
+  vi.mocked(firstHost.deliverReport).mockImplementation(() => new Promise(() => {}))
+  const firstRuns = new ReporterAutonomousRuns(firstHost)
+  const initial = await firstRuns.start(request({ mode: 'real-service', permissions: { read_only_service: true } }))
+  const pending = await waitRunStopped(firstRuns, initial.id)
+  expect(pending).toMatchObject({ status: 'incomplete', report_delivery: { status: 'pending' } })
+
+  const recoveredHost = fakeHost(directory, invoke)
+  const recoveredRuns = new ReporterAutonomousRuns(recoveredHost)
+  await recoveredRuns.resumePendingDeliveries()
+  expect(recoveredRuns.get(initial.id)).toMatchObject({ status: 'incomplete', report_delivery: { status: 'delivered', master_session_id: 'main-session-from-host' } })
+  expect(recoveredHost.deliverReport).toHaveBeenCalledOnce()
+  expect(vi.mocked(recoveredHost.deliverReport).mock.calls[0]?.[0]).toEqual(vi.mocked(firstHost.deliverReport).mock.calls[0]?.[0])
+  expect(invoke).toHaveBeenCalledOnce()
+})
+
+it('reuses the frozen terminal report after scenario evidence changes during retry', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  const requests: ReporterModelRequest[] = []
+  const invoke = vi.fn(async (input: ReporterModelRequest): Promise<ReporterModelResponse> => {
+    requests.push(input)
+    const simulatorCalls = requests.filter(item => item.role === 'user-simulator').length
+    if (input.role === 'autonomous-explorer') return { output: { kind: 'simulation', hypothesis: '验证仿真轨迹可回传',
+      goal: '只读检查并说明依据', persona: '仓库维护者，需要检查结果。' }, usage }
+    if (input.role === 'user-simulator') return { output: simulatorCalls === 3 ? { kind: 'finished', summary: '已经收到目标回复。' }
+      : { kind: 'action', actor_id: 'alice', action: { kind: 'message', ...(simulatorCalls === 1 ? { addressed: 'mention' as const } : {}),
+        text: simulatorCalls === 1 ? '请只读检查登录入口并说明依据。' : '请补充刚才结论的证据。' } }, usage }
+    return { output: { summary: '轨迹已审查。', findings: [] }, usage }
+  })
+  const host = fakeHost(directory, invoke)
+  let scenarioPassed = true
+  const scenario = host.reporter.scenario
+  host.reporter.scenario = id => {
+    const value = scenario(id)
+    return value ? { ...value, oracle: { ...value.oracle, passed: scenarioPassed } } as never : undefined
+  }
+  vi.mocked(host.deliverReport).mockRejectedValueOnce(Object.assign(new Error('暂时不可用'), { code: 'report_delivery_unavailable' }))
+  const runs = new ReporterAutonomousRuns(host)
+  const initial = await runs.start(request())
+  const failed = await waitTerminal(runs, initial.id)
+  expect(failed.report_delivery).toMatchObject({ status: 'failed' })
+  const originalCall = vi.mocked(host.deliverReport).mock.calls[0]![0]
+  expect(originalCall.report.experiments[0]).toMatchObject({ oracle_status: 'passed', public_transcript: expect.any(Array) })
+
+  scenarioPassed = false
+  const retried = await runs.retryReport(initial.id)
+  const retryCall = vi.mocked(host.deliverReport).mock.calls[1]![0]
+  expect(retried.report_delivery).toMatchObject({ status: 'delivered' })
+  expect(retryCall).toEqual(originalCall)
+  expect(invoke).toHaveBeenCalledTimes(5)
+})
+
+it('retains failed report delivery and supports explicit idempotent retry without rerunning the Reporter', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  const invoke = vi.fn(async () => ({ output: { kind: 'finished', summary: '只读管理检查已结束。' }, usage }))
+  const host = fakeHost(directory, invoke)
+  vi.mocked(host.deliverReport).mockRejectedValueOnce(Object.assign(new Error('private details'), { code: 'report_delivery_flush_failed' }))
+  const runs = new ReporterAutonomousRuns(host)
+  const initial = await runs.start(request({ mode: 'real-service', permissions: { read_only_service: true } }))
+  const failed = await waitTerminal(runs, initial.id)
+
+  expect(failed).toMatchObject({ status: 'incomplete', report_delivery: { status: 'failed', error_code: 'report_delivery_flush_failed' } })
+  expect(JSON.stringify(failed.report_delivery)).not.toContain('private details')
+  expect(host.deliverReport).toHaveBeenCalledOnce()
+  const retried = await runs.retryReport(initial.id)
+  expect(retried).toMatchObject({ report_delivery: { status: 'delivered', master_session_id: 'main-session-from-host' } })
+  expect(await runs.retryReport(initial.id)).toEqual(retried)
+  expect(host.deliverReport).toHaveBeenCalledTimes(2)
+  expect(invoke).toHaveBeenCalledOnce()
+  expect(vi.mocked(host.deliverReport).mock.calls.map(([input]) => input.runId)).toEqual([initial.id, initial.id])
 })
 
 it('persists safe Simulator schema paths when the model output is invalid', async () => {
@@ -163,7 +329,9 @@ it('keeps a failed authorization oracle as a candidate and marks the run incompl
     const checks = report.oracle.checks.map(check => check.assertion.kind === 'decision'
       ? { ...check, passed: false }
       : check)
-    return { ...report, behavioral_pass: false, oracle: { ...report.oracle, passed: false, checks } }
+    const failed = { ...report, behavioral_pass: false, oracle: { ...report.oracle, passed: false, checks } }
+    host.reporter.scenario = scenarioId => scenarioId === id ? failed : host.reporter.scenario(scenarioId)
+    return failed
   }
   const runs = new ReporterAutonomousRuns(host)
   const initial = await runs.start(request())
@@ -173,6 +341,10 @@ it('keeps a failed authorization oracle as a candidate and marks the run incompl
   expect(terminal.findings).toContainEqual(expect.objectContaining({ status: 'candidate', title: '明确授权请求未得到预期接单决定' }))
   expect(terminal.findings?.some(item => item.status === 'invalid-test' && item.title === '明确授权请求未得到预期接单决定')).toBe(false)
   expect(terminal.model_calls).toBeGreaterThan(3)
+  expect(JSON.stringify(terminal.findings)).not.toContain('assertion')
+  const delivered = vi.mocked(host.deliverReport).mock.calls[0]![0].report
+  expect(delivered.experiments[0]).toMatchObject({ oracle_status: 'failed' })
+  expect(JSON.stringify(delivered)).not.toContain('assertion')
 })
 
 it('keeps a Reporter model transport failure as a candidate diagnostic', async () => {
@@ -306,8 +478,9 @@ it('recovers from an ambiguous browser action by exposing its stable error and f
   const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
   const observation: ReporterBrowserObservation = { path: '/settings', title: '设置', accessibility_snapshot: 'tab "来源"; button "刷新"',
     snapshot_truncated: false, page_errors: 0, console_errors: 0, blocked_requests: [], blocked_console_errors: 0 }
-  const actionInputs: unknown[] = []
+  const actionInputs: unknown[] = [], requests: ReporterModelRequest[] = []
   const invoke = vi.fn(async (input: ReporterModelRequest): Promise<ReporterModelResponse> => {
+    requests.push(input)
     if (input.role === 'browser-tester') {
       actionInputs.push(input.input)
       const call = actionInputs.length
@@ -327,9 +500,19 @@ it('recovers from an ambiguous browser action by exposing its stable error and f
   const initial = await runs.start(request({ mode: 'browser', permissions: { browser: true } }))
   const terminal = await waitTerminal(runs, initial.id)
   expect(terminal).toMatchObject({ status: 'completed', mode: 'browser', turns: 3, model_calls: 6,
-    experiment_log: [{ kind: 'browser', hypothesis: '检查设置页导航与可访问名称' }] })
+    experiment_log: [{ kind: 'browser', hypothesis: '检查设置页导航与可访问名称', browser_steps: [
+      { index: 1, action: 'initial-observation', result: 'observed', page: { path: '/settings', title: '设置' }, snapshot: 'tab "来源"; button "刷新"' },
+      { index: 2, action: { kind: 'click', role: 'button', name: '来源' }, result: 'failed', error_code: 'browser_action_not_unique' },
+      { index: 3, action: { kind: 'snapshot' }, result: 'observed' },
+      { index: 4, action: { kind: 'click', role: 'button', name: '刷新' }, result: 'completed' },
+    ] }] })
+  expect(terminal.experiment_log[0]?.observation).not.toContain('accessibility_snapshot')
+  expect(terminal.experiment_log[0]?.observation.startsWith('{')).toBe(false)
   expect(JSON.stringify(actionInputs[1])).toContain('browser_action_not_unique')
   expect(JSON.stringify(actionInputs[1])).toContain('刷新')
+  const reviewer = requests.find(item => item.role === 'qualitative-reviewer')?.input as { experiments: { browser_steps?: unknown[] }[] } | undefined
+  expect(reviewer?.experiments[0]?.browser_steps).toHaveLength(4)
+  expect(JSON.stringify(reviewer?.experiments[0]?.browser_steps)).not.toContain('auth')
   expect(driver.close).toHaveBeenCalledOnce()
 })
 
@@ -349,8 +532,9 @@ it('keeps the initial page evidence but does not complete browser testing withou
   const terminal = await waitTerminal(runs, initial.id)
 
   expect(terminal).toMatchObject({ status: 'incomplete', error_code: 'browser_no_action', turns: 0 })
-  expect(terminal.experiment_log[0]?.evidence.join('\n')).toContain('accessibility_snapshot')
-  expect(terminal.experiment_log[0]?.evidence.join('\n')).toContain('概览')
+  expect(terminal.experiment_log[0]?.browser_steps).toMatchObject([{ action: 'initial-observation', result: 'observed',
+    page: { path: '/overview', title: '概览' }, snapshot: 'heading "概览"; link "工单"' }])
+  expect(terminal.experiment_log[0]?.observation).not.toContain('{"path"')
   expect(terminal.findings).toContainEqual(expect.objectContaining({ status: 'invalid-test', title: '浏览器探索没有执行成功的控件操作' }))
   expect(driver.act).not.toHaveBeenCalled()
   expect(driver.close).toHaveBeenCalledOnce()
@@ -378,7 +562,7 @@ it.each([
   expect(terminal).toMatchObject({ status: 'incomplete', error_code: expected.error_code, turns: 0,
     model_calls: 2, model_usage: { prompt_tokens: expected.prompt_tokens, completion_tokens: expected.completion_tokens } })
   expect(driver.act).not.toHaveBeenCalled()
-  expect(terminal.experiment_log[0]?.evidence.join('\n')).toContain('工单')
+  expect(terminal.experiment_log[0]?.browser_steps).toMatchObject([{ action: 'initial-observation', page: { title: '工单' }, snapshot: 'button "工单"' }])
 })
 
 it('marks an unfinished browser exploration incomplete when its action budget is exhausted', async () => {
@@ -397,7 +581,8 @@ it('marks an unfinished browser exploration incomplete when its action budget is
     max_experiments: 1, max_total_tokens: 20_000, timeout_ms: 30_000 } }))
   const terminal = await waitTerminal(runs, initial.id)
   expect(terminal).toMatchObject({ status: 'incomplete', error_code: 'browser_action_budget', turns: 2 })
-  expect(terminal.experiment_log[0]?.evidence.filter(item => item.includes('执行')).length).toBe(2)
+  expect(terminal.experiment_log[0]?.browser_steps?.filter(step => step.action !== 'initial-observation' && step.action.kind === 'click'
+    && step.result === 'completed')).toHaveLength(2)
 })
 
 it('retains known over-budget token usage and refuses the generated simulation action', async () => {

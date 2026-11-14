@@ -17,6 +17,10 @@ it('exposes only a read-only Reporter management projection and protects autonom
       start: async (input: unknown) => { calls.push(['start', input]); return view },
       list: () => [view], get: (id: string) => id === 'auto-1' ? view : undefined,
       cancel: (id: string) => { calls.push(['cancel', id]); if (id !== 'auto-1') throw new ReporterAutonomousRunError(404, 'run_not_found', 'Reporter 运行不存在'); return view },
+      retryReport: async (id: string) => { calls.push(['retryReport', id]);
+        if (id !== 'auto-1') throw new ReporterAutonomousRunError(404, 'run_not_found', 'Reporter 运行不存在')
+        return { ...view, report_delivery: { status: 'delivered', master_session_id: 'orchestrator-test' } }
+      },
     } })
   expect(await call('GET', 'reporter')).toEqual({ status: 200, body: { enabled: true, runs: [view] } })
   expect(await call('POST', '../reporter/runs', { idempotency_key: 'one' })).toMatchObject({ status: 401 })
@@ -29,11 +33,18 @@ it('exposes only a read-only Reporter management projection and protects autonom
     .toEqual({ status: 200, body: view })
   expect(await call('POST', '../reporter/runs/auto-1/cancel', undefined, { authorization: `Bearer ${token}` }))
     .toEqual({ status: 200, body: view })
+  expect(await call('POST', '../reporter/runs/auto-1/report')).toMatchObject({ status: 401, body: { code: 'unauthorized' } })
+  expect(await call('POST', '../reporter/runs/auto-1/report', undefined, { authorization: `Bearer ${token}`, origin: 'http://evil.example' }))
+    .toMatchObject({ status: 403 })
+  expect(await call('POST', '../reporter/runs/auto-1/report', undefined, { authorization: `Bearer ${token}` }))
+    .toMatchObject({ status: 200, body: { report_delivery: { status: 'delivered', master_session_id: 'orchestrator-test' } } })
   expect(await call('GET', '../reporter/runs/missing', undefined, { authorization: `Bearer ${token}` }))
     .toEqual({ status: 404, body: { error: 'Reporter run not found' } })
   expect(await call('POST', '../reporter/runs/missing/cancel', undefined, { authorization: `Bearer ${token}` }))
     .toEqual({ status: 404, body: { error: 'Reporter 运行不存在', code: 'run_not_found' } })
-  expect(calls).toEqual([['start', { idempotency_key: 'one' }], ['cancel', 'auto-1'], ['cancel', 'missing']])
+  expect(await call('POST', '../reporter/runs/missing/report', undefined, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 404, body: { error: 'Reporter 运行不存在', code: 'run_not_found' } })
+  expect(calls).toEqual([['start', { idempotency_key: 'one' }], ['cancel', 'auto-1'], ['retryReport', 'auto-1'], ['cancel', 'missing'], ['retryReport', 'missing']])
 })
 
 it('reports Reporter as disabled without exposing run data when autonomous runs are unavailable', async () => {
