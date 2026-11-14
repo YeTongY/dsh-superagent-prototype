@@ -303,6 +303,10 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/reporter/index.ts` | 本地 Reporter、脚本和可选模型协调器的公开入口 |
 | `src/reporter/protocol.ts` | 严格场景与动作协议、隐藏 Oracle 和运行时快照类型 |
 | `src/reporter/local-reporter.ts` | 输入日志、幂等恢复、本地输出、checkpoint、Oracle 和无模型回放 |
+| `src/reporter/autonomous.ts` | 有界自主测试运行、模型预算、场景选择、证据和终态持久化 |
+| `src/reporter/browser.ts` | 受限的 loopback 管理页浏览器观察与语义动作 |
+| `src/reporter/dsh-model.ts` | 复用 DSH 原生模型路由和每次调用的 `medium` 推理等级 |
+| `src/client/reporter-status.tsx` | 只读展示自主 Reporter 进度、用量、实验和发现 |
 | `src/reporter/script.ts` | 不调用模型的多角色场景脚本驱动器 |
 | `src/reporter/coordinator.ts` | 注入模型的 User Simulator 与 Reviewer、安全投影、预算与中止控制 |
 | `src/index.ts` | 主插件入口：读取机器设置、启动 Runtime，并为保存 Source 账号后触发 Runtime 重启提供回调。 |
@@ -424,6 +428,10 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | `tests/reporter.spec.ts` | 本地 Reporter 协议、持久化、隐藏 Oracle、脚本与回放 |
 | `tests/reporter-coordinator.spec.ts` | 假模型驱动的多轮行为、隐藏 Oracle、严格输出、预算、取消与成本未知处理 |
 | `tests/reporter-runtime.spec.ts` | 真实 Runtime/Engine 的本地闭环、GitHub/GitLab 同号项目和 MR 报告路由 |
+| `tests/reporter-autonomous.spec.ts` | 自主选择、多轮目标反馈、证据、预算、幂等与运行恢复 |
+| `tests/reporter-browser.spec.ts` | loopback 浏览器登录、同源限制、语义动作和凭据隔离 |
+| `tests/reporter-dsh-model.spec.ts` | 原生 DSH 模型调用的 medium 配置、用量映射和失败分类 |
+| `tests/panel-overview.spec.tsx` | 概览与自主 Reporter 状态、证据、用量及发现展示 |
 | `tests/gitlab-vpn-e2e.spec.ts` | 显式门控的真实 glab 认证、Issue/MR 幂等评论、MR 生命周期与资源清理；默认跳过 |
 | `tests/gitlab.spec.ts` | Fake glab 的参数、分页、认证、TLS、项目隔离、讨论交付、临时故障和 CI 证据 |
 | `tests/ticket-shell.spec.ts` | 真实子进程中的并发环境绑定、转义、权限与宿主环境保持 |

@@ -2,6 +2,7 @@ FROM node:24-bookworm-slim AS build
 
 ARG PNPM_VERSION=11.7.0
 WORKDIR /opt/dsh-superagent
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 RUN npm install --global "pnpm@${PNPM_VERSION}"
 COPY . .
@@ -16,6 +17,7 @@ ARG DSH_VERSION=0.2.1-rc.3
 ARG PNPM_VERSION=11.7.0
 ARG GH_VERSION=2.104.0
 ARG GLAB_VERSION=1.130.0
+ARG REPORTER_BROWSER=0
 
 # The release hashes were checked against the official GitHub and GitLab release assets.
 ARG GH_AMD64_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
@@ -56,7 +58,16 @@ COPY --chown=node:node docker/profile.patch.yml /opt/dsh-superagent/docker/profi
 ENV DSH_HOME=/data/dsh \
     DSH_SUPERAGENT_PROFILE=superagent \
     HOME=/home/node \
+    DSH_SUPERAGENT_REPORTER_BROWSER=${REPORTER_BROWSER} \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_ENV=production
+
+RUN mkdir -p /ms-playwright \
+ && if [ "${REPORTER_BROWSER}" = "1" ]; then \
+      /opt/dsh-superagent/node_modules/.bin/playwright install --with-deps chromium; \
+    fi \
+ && rm -rf /var/lib/apt/lists/* \
+ && chown -R node:node /ms-playwright
 
 RUN chmod 0755 /usr/local/bin/dsh-superagent-entrypoint \
  && mkdir -p /data/dsh /data/superagent /data/gh /data/glab /data/work \

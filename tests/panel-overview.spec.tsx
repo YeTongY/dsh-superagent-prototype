@@ -4,13 +4,16 @@ import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, all, find, tab, click, text } from './fixtures/panel.tsx'
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
+import type { ReporterAutonomousRunView } from '../src/reporter/autonomous.ts'
 
 usePanel()
 it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
   expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['概览', '来源', '触发', '评估', '执行', '设置'])
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['待处理工单2', '系统问题2', '过去 24 小时详情 ›', '执行器详情 ›'])
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['待处理工单2', '系统问题2', '自主测试报告者0',
+    '过去 24 小时详情 ›', '执行器详情 ›'])
+  expect(text()).toContain('报告者已关闭，当前没有运行。')
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual(['待回答', '待处理失败'])
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toEqual(['飞书 来源异常', '评估未完成：这个文案好奇怪'])
   // Actions sit below the title and Threads, apart from the stage, each with its icon.
@@ -19,6 +22,7 @@ it('leads the overview with the pending Tickets, then problems, the last day and
   expect(text()).toContain('来源会在每次轮询时自动重试')
   expect(text()).toContain('需要确认按钮颜色')
   expect(all('.dt-stat').map(stat => stat.textContent)).toEqual(['到达12', '被过滤2', '已评估5', '接单或续做1', '执行中2 / 3', '排队0', '等待新触发1'])
+  expect(server.requests.some(request => request.path === 'reporter' && request.method === 'GET')).toBe(true)
   expect(all('.dt-chip').map(chip => chip.textContent)[0]).toBe('GitHub#42CI 失败1')
   expect(document.querySelector('.dt-chip-problem')?.textContent).toBe('CI 失败1')
   expect(document.querySelector<HTMLAnchorElement>('a.dt-chip-link')?.href).toBe('https://github.com/acme/widgets/pull/42')
@@ -125,11 +129,91 @@ it('words a refused retry in the interface language by its code', async () => {
 
 it('shows the overview in English', async () => {
   await mount(en)
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.pendingTickets}2`, `${en.problems}2`,
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.pendingTickets}2`, `${en.problems}2`, `${en['reporter.title']}0`,
     `${en.lastDay}${en.details}`, `${en['term.executor']}${en.details}`])
+  expect(text()).toContain(en['reporter.disabled'])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual([en['stage.answer'], en['stage.failed']])
   expect(all('.dt-stat-label').map(label => label.textContent)).toEqual([en.flowReceivedLabel, en.flowFilteredLabel, en.flowJudgedLabel,
     en.flowAcceptedLabel, en.executingLabel, en.queuedLabel, en.idleLabel])
+})
+
+const autonomousRun = (id: string, status: ReporterAutonomousRunView['status'], finding = false): ReporterAutonomousRunView => ({
+  id, goal: '检查自举项目的问题处理体验', project_source_id: 'github:acme/widgets', mode: 'both', status,
+  phase: status === 'running' ? 'simulation' : 'finished', started_at: '2026-11-14T00:00:00.000Z', updated_at: '2026-11-14T00:01:00.000Z',
+  model: { provider: 'host', model: 'reporter-model', reasoningEffort: 'medium' }, experiments: 1, turns: 2, model_calls: 4,
+  model_usage: { prompt_tokens: 1_240, completion_tokens: 320, cost_usd: null, latency_ms: 4200, retries: null, completeness: 'partial' },
+  scenario_ids: ['auto-scenario-1'], experiment_log: [
+    { kind: 'simulation', hypothesis: '一条简短的产品请求可能让目标先确认需求。',
+      observation: 'Superagent 已针对第一次请求创建并返回本地工单确认。', evidence: ['输入序号 1', '目标回复序号 2'], scenario_id: 'auto-scenario-1' },
+    { kind: 'real-service', hypothesis: '查看运行状态可以发现对用户不可见的阻塞。',
+      observation: '运行状态正常，来源仍处于可用状态。', evidence: ['HTTP 状态 200'] },
+    { kind: 'browser', hypothesis: '概览页应该明确显示 Reporter 是否开始测试。',
+      observation: '页面显示了已启用但尚无运行的空状态。', evidence: ['页面可见文本检查'] },
+  ],
+  summary: '报告者根据产品目标自主选择了一个测试方向。',
+  ...(finding ? { findings: [{ severity: 'warning' as const, status: 'candidate' as const, title: '错误反馈可能不够清楚',
+    evidence: ['第 2 次用户动作收到通用失败反馈'], reproduction: ['提交一个无效请求', '观察 Superagent 的拒绝说明'] }] } : {}),
+})
+
+it('shows an enabled idle Reporter distinctly from an active run and presents its autonomous evidence', async () => {
+  server.reporter = { enabled: true, runs: [] }
+  await mount()
+  expect(text()).toContain(zh['reporter.enabledIdle'])
+  expect(text()).not.toContain(zh['reporter.status.running'])
+
+  server.reporter = { enabled: true, runs: [autonomousRun('run-active', 'running', true)] }
+  await remount()
+  expect(text()).toContain(zh['reporter.status.running'])
+  expect(text()).toContain('阶段：simulation')
+  expect(text()).toContain('仿真和服务检查')
+  expect(text()).toContain('模型：host/reporter-model')
+  expect(text()).toContain('推理等级：medium')
+  expect(text()).toContain('实验 1')
+  expect(text()).toContain('用户动作 2')
+  expect(text()).toContain('模型调用 4')
+  expect(text()).toContain('输入 Token：1240')
+  expect(text()).toContain('输出 Token：320')
+  expect(text()).toContain('费用（美元）：未知')
+  expect(text()).toContain('重试次数：未知')
+  expect(text()).toContain('用量部分未知')
+  expect(text()).toContain('auto-scenario-1')
+  expect(text()).toContain('自主测试过程')
+  expect(text()).toContain('一条简短的产品请求可能让目标先确认需求。')
+  expect(text()).toContain('Superagent 已针对第一次请求创建并返回本地工单确认。')
+  expect(text()).toContain('输入序号 1')
+  expect(text()).toContain('查看运行状态可以发现对用户不可见的阻塞。')
+  expect(text()).toContain('HTTP 状态 200')
+  expect(text()).toContain('浏览器操作')
+  expect(text()).toContain('页面显示了已启用但尚无运行的空状态。')
+  const details = all('.dt-reporter-experiment details')
+  expect(details).toHaveLength(3)
+  expect(details.every(item => !(item as HTMLDetailsElement).open)).toBe(true)
+  expect(details[0]?.querySelector('summary')?.textContent).toBe(zh['reporter.experimentDetails'])
+  expect(all('.dt-reporter-finding details').every(item => !(item as HTMLDetailsElement).open)).toBe(true)
+  expect(text()).toContain('错误反馈可能不够清楚')
+  expect(text()).toContain('第 2 次用户动作收到通用失败反馈')
+  expect(text()).toContain('提交一个无效请求')
+})
+
+it('labels browser actions separately from simulated user actions', async () => {
+  server.reporter = { enabled: true, runs: [
+    { ...autonomousRun('browser', 'completed'), mode: 'browser' },
+  ] }
+  await mount()
+  expect(text()).toContain('浏览器动作 2')
+  expect(text()).not.toContain('用户动作 2')
+})
+
+it('labels completed, incomplete, failed and cancelled runs separately', async () => {
+  server.reporter = { enabled: true, runs: [
+    autonomousRun('done', 'completed'), autonomousRun('partial', 'incomplete'), autonomousRun('failed', 'failed'),
+    autonomousRun('cancelled', 'cancelled'),
+  ] }
+  await mount()
+  expect(all('.dt-reporter-run > .dt-row-main > .dt-row-meta:first-of-type').map(item => item.textContent)).toEqual([
+    `${zh['reporter.status.completed']}阶段：finished仿真和服务检查`, `${zh['reporter.status.incomplete']}阶段：finished仿真和服务检查`,
+    `${zh['reporter.status.failed']}阶段：finished仿真和服务检查`, `${zh['reporter.status.cancelled']}阶段：finished仿真和服务检查`,
+  ])
 })
 
 it('lists the unavailable Evals one by one, without the health entry that counts them as a failure of dsh-superagent', async () => {

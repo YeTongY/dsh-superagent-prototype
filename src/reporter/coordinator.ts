@@ -15,15 +15,33 @@ const ModelUsageSchema = z.object({ model: z.string().max(200).optional(), promp
   completion_tokens: z.number().int().nonnegative().optional(), cost_usd: z.number().nonnegative().optional(), latency_ms: z.number().nonnegative().optional(),
   retries: z.number().int().nonnegative().optional() }).strict()
 
-export type ReporterModelRole = 'user-simulator' | 'qualitative-reviewer'
-export interface ReporterModelRequest {
-  role: ReporterModelRole
+export type ReporterModelRole = 'autonomous-explorer' | 'user-simulator' | 'browser-tester' | 'qualitative-reviewer'
+interface ReporterModelRequestBase {
   instructions: string
-  input: ReporterSimulatorFeedback | ReporterReviewEvidence
   signal: AbortSignal
   /** 尚未计量的最大预算；注入方可将它传给模型服务。 */
   remaining_budget: { cost_usd?: number; total_tokens?: number }
 }
+export interface ReporterExperimentEvidence { kind: 'simulation' | 'real-service' | 'browser'; hypothesis: string; observation: string; evidence: string[]; scenario_id?: string }
+export interface ReporterExplorerInput {
+  goal: string; mode: 'simulation' | 'real-service' | 'browser' | 'both'; permissions: { simulation: boolean; read_only_service: boolean; browser: boolean }
+  remaining: { experiments: number; actions: number; model_calls: number; tokens: number }; capabilities: string[]
+  project: { id: string; provider: string; host: string; project: string } | undefined; safe_state: unknown
+  available_read_only_probes: string[]; can_simulate_users: boolean; can_test_browser: boolean; previous_experiments: ReporterExperimentEvidence[]
+}
+export interface ReporterBrowserModelInput {
+  hypothesis: string; observation: import('./browser.ts').ReporterBrowserObservation; previous: string[]
+  permissions: '只读；不得提交、推送、发外部消息或修改文件'
+}
+export interface ReporterAutonomousReviewInput {
+  goal: string; experiments: ReporterExperimentEvidence[]; simulations: ReporterReviewEvidence[]
+  instruction: '只归纳可见证据并列候选问题；不要判定或改写确定性结果。'
+}
+export type ReporterModelRequest = ReporterModelRequestBase
+  & ({ role: 'autonomous-explorer'; input: ReporterExplorerInput }
+    | { role: 'user-simulator'; input: ReporterSimulatorFeedback }
+    | { role: 'browser-tester'; input: ReporterBrowserModelInput }
+    | { role: 'qualitative-reviewer'; input: ReporterReviewEvidence | ReporterAutonomousReviewInput })
 export interface ReporterModelResponse { output: unknown; usage?: unknown }
 /** 由调用者提供的模型边界。该函数不会被 createLocalReporter 或 Runtime 自动调用。 */
 export type ReporterModelInvoker = (request: ReporterModelRequest) => Promise<ReporterModelResponse>
@@ -63,6 +81,11 @@ export interface ReporterReviewerRunResult {
 
 const SIMULATOR_INSTRUCTIONS = `你扮演场景中可见的用户或协作角色，遵守 Persona 和目标，根据最近可见对话逐步给出下一步动作。你只能给出 JSON：{"kind":"action","actor_id":"场景内 Actor","action":{"kind":"message|review|approval|ci|stop",...},"after_ms":0}，或者在现实用户会话自然结束时给出 {"kind":"finished"}。不要猜测或要求查看隐藏 Oracle、内部 Ticket 状态、运行时评分或未来测试步骤。不要把后续所有动作一次性说完。`
 const REVIEWER_INSTRUCTIONS = `你是定性沟通审查者。只根据提供的轨迹、输出和结构化状态总结沟通质量、异常和证据。不要判定 behavioral_pass、delivery_pass 或 platform_pass，不要更改任何确定性结果。只输出 JSON：{"summary":"...","findings":[{"severity":"info|warning|error","text":"...","evidence":["轨迹序号或可见事件标识"]}]}。`
+export const REPORTER_REVIEWER_INSTRUCTIONS = REVIEWER_INSTRUCTIONS
+export function parseReporterReviewerOutput(value: unknown): z.infer<typeof ReviewerOutputSchema> | undefined {
+  const parsed = ReviewerOutputSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
 
 type Metric = number | null
 interface Accumulator {
@@ -200,11 +223,16 @@ export async function runUserSimulator(options: {
   invoke: ReporterModelInvoker
   waitForSuperagent(signal: AbortSignal): Promise<void>
   maxTurns?: number
+  minTurns?: number
+  validateAction?(action: ReporterAction, turn: number): boolean
+  onProgress?(progress: { phase: 'action_submitted' | 'target_waiting' | 'target_completed'; turns: number; sequence: number }): void
   budget?: ReporterModelBudget
   signal?: AbortSignal
   now?: () => string
 }): Promise<ReporterSimulatorRunResult> {
   const maxTurns = checkedMaxTurns(options.maxTurns)
+  const minTurns = options.minTurns ?? 0
+  if (!Number.isSafeInteger(minTurns) || minTurns < 0 || minTurns > maxTurns) throw new RangeError(`minTurns 必须是 0 到 ${maxTurns} 之间的整数`)
   const budget = checkedBudget(options.budget)
   const signal = runSignal(options.signal, budget.timeout_ms ?? 120_000)
   const usage = accumulator(), acknowledgements: ReturnType<LocalReporter['submit']>[] = []
@@ -223,15 +251,21 @@ export async function runUserSimulator(options: {
         return finish('incomplete', 'max_calls', options.reporter.scenario(options.scenarioId))
       }
       const response = await invokeAndRecord({ invoke: options.invoke, reporter: options.reporter, scenarioId: options.scenarioId, usage,
-        request: { role: 'user-simulator', instructions: SIMULATOR_INSTRUCTIONS, input: feedback, signal, remaining_budget: remainingBudget(usage, budget) } })
+        request: { role: 'user-simulator', instructions: SIMULATOR_INSTRUCTIONS + (turns < minTurns
+          ? ` 当前已完成 ${turns} 次用户动作；在达到至少 ${minTurns} 次真实用户动作并观察目标回复前，不得结束。` : ''),
+          input: feedback, signal, remaining_budget: remainingBudget(usage, budget) } })
       if (requiredBudgetUnknown(usage, budget)) return finish('incomplete', 'usage_unknown', options.reporter.scenario(options.scenarioId))
       if (budgetExceeded(usage, budget)) { return finish('incomplete', 'budget_exhausted', options.reporter.scenario(options.scenarioId)) }
 
       const parsed = SimulatorTurnSchema.safeParse(response.output)
       if (!parsed.success) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'invalid_simulator_output')
       if (parsed.data.kind === 'finished') {
+        if (turns < minTurns) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'simulator_finished_too_early')
         await abortable(options.waitForSuperagent(signal), signal)
         return finish('completed', 'simulator_finished', options.reporter.completeScenario(options.scenarioId))
+      }
+      if (options.validateAction && !options.validateAction(parsed.data.action, turns)) {
+        return finish('input_rejected', 'input_rejected', options.reporter.scenario(options.scenarioId), 'simulator_action_out_of_scope')
       }
       offset += parsed.data.after_ms
       const envelope = { scenario_id: feedback.scenario.id, scenario_version: feedback.scenario.version, sequence: feedback.last_sequence + 1,
@@ -244,14 +278,21 @@ export async function runUserSimulator(options: {
         return finish('input_rejected', 'input_rejected', options.reporter.scenario(options.scenarioId), code)
       }
       turns++
+      options.onProgress?.({ phase: 'action_submitted', turns, sequence: envelope.sequence })
+      options.onProgress?.({ phase: 'target_waiting', turns, sequence: envelope.sequence })
       await abortable(options.waitForSuperagent(signal), signal)
-      feedback = options.reporter.simulatorFeedback(options.scenarioId)!
+      options.onProgress?.({ phase: 'target_completed', turns, sequence: envelope.sequence })
+      const nextFeedback = options.reporter.simulatorFeedback(options.scenarioId)
+      if (!nextFeedback) return finish('incomplete', 'input_rejected', options.reporter.scenario(options.scenarioId), 'scenario_not_found')
+      feedback = nextFeedback
     }
     return finish('incomplete', 'max_calls', options.reporter.scenario(options.scenarioId))
   } catch (error) {
     if (signal.aborted) return finish('incomplete', stopReason(signal), options.reporter.scenario(options.scenarioId))
     if (error instanceof z.ZodError) return finish('invalid_output', 'invalid_output', options.reporter.scenario(options.scenarioId), 'invalid_model_response')
-    return finish('incomplete', 'input_rejected', options.reporter.scenario(options.scenarioId), 'model_call_failed')
+    const errorCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code
+      : error instanceof Error && error.message === 'model_call_failed' ? 'model_call_failed' : 'target_wait_failed'
+    return finish('incomplete', 'input_rejected', options.reporter.scenario(options.scenarioId), errorCode)
   }
 }
 

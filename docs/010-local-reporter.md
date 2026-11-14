@@ -164,6 +164,49 @@ const review = await runQualitativeReviewer({
 
 目标 Superagent 的模型调用成本默认无法按场景自动归属，因为主 Session 可能同时处理多个场景和其他工作。只有外部 Runner 确实掌握对应 Token、时延、成本和重试时，才调用 `/usage` 记录 `role: "superagent"`。没有提供的成本保持未知，不能当作 0。脚本 Simulator 的零成本只表示它没有调用模型。
 
+## 自主测试运行
+
+固定脚本用于稳定回归；自主报告者接收的是产品级目标、ProjectSource、允许的测试通道和有限预算。它自行观察运行状态、选择实验、根据真实反馈调整测试，最后保存发现与复现证据。调用方不需要先为它编写完整场景。
+
+运行接口位于 `/orchestrator/reporter/runs`，仍要求上文的 loopback、同源请求头及 capability 认证：
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `POST /runs` | 以幂等键提交测试目标、项目、权限和预算，异步返回运行状态 |
+| `GET /runs` | 查看有界的运行列表 |
+| `GET /runs/:id` | 查看阶段、实际调用数及结果 |
+| `POST /runs/:id/cancel` | 中止后续测试动作和模型请求 |
+| `GET /orchestrator/api/reporter` | 管理页的只读状态投影，不含 capability、认证或隐藏 Oracle |
+
+例如下面的启动输入只描述测试目标，不指定测试场景和操作顺序；将项目 ID 换成实际已启用的来源：
+
+```json
+{
+  "idempotency_key": "explore-product-v1",
+  "project_source_id": "github-0123456789abcdef01234567",
+  "goal": "从首次使用的维护者视角，自主探索需求处理与后续沟通是否清楚、正确；根据实际反馈选择测试，保留疑点的复现证据。",
+  "mode": "simulation",
+  "permissions": { "simulation": true },
+  "budget": {
+    "max_model_calls": 12,
+    "max_actions": 4,
+    "max_experiments": 1,
+    "max_total_tokens": 100000,
+    "timeout_ms": 600000
+  }
+}
+```
+
+`mode` 可选 `simulation`、`real-service`、`browser` 或 `both`（仿真与接口）。接口测试需 `read_only_service: true`；浏览器测试需同时声明 `browser: true` 和 `read_only_service: true`。未声明的权限默认关闭。预算限制的是 Reporter 后续调用；被测 Superagent 的模型消耗单独记录，不能把 Reporter 的 Token 上限冒充整个系统的总费用上限。`max_total_tokens` 是累计已报告用量的停止阈值，本次输出另按剩余额度限制；单次输入用量在模型返回前无法精确计量，可能跨过阈值。越过时保留实际 Token，运行标为未完成并停止后续调用，不把已知用量改成未知。
+
+仿真通道通过独立用户模拟上下文产生动作，动作仍进入真实 Runtime/Engine；每轮等待目标实际处理后，才将公开回复用于下一轮。只读服务通道访问当前实例的实际管理 HTTP 接口。浏览器通道使用可选的 Playwright Chromium，在独立上下文中观察真实页面并执行有限动作；没有安装浏览器或无法登录时明确报告不可用，不用接口结果代替页面操作证据。
+
+探索者、Simulator 和 Reviewer 的模型请求均显式使用 `medium`，目标 Superagent 的模型配置独立。模型路由与认证复用 DSH 原生服务，不增加另一套 Responses 客户端。启动前校验模型是否支持 medium；运行中显示实际选择的模型及调用次数。费用未知保持未知，缓存读取计入输入 Token；不能由测试调用数直接推导节省了多少成本。
+
+一次实例只运行一个自主测试。重复幂等请求返回原运行；取消、运行时关闭或预算耗尽后不再发起后续动作。重启不自动恢复付费任务。管理页将“已启用但未运行”与“正在测试”分开，并展示实验、用户动作、模型调用、摘要和发现。发现分为候选、已确认、测试本身无效；只有可验证证据支持的结果才能作为确认缺陷，模型怀疑不能直接升级为事实。
+
+浏览器登录由运行时通过 DSH 官方 Connection 服务取得临时登录地址，驱动在浏览器内部交换 Cookie；认证地址、Cookie、Reporter capability 和模型密钥不进入模型或轨迹。页面驱动限制到同一 loopback 服务，禁止外站与文件传输。该约束不替代 Worker 的操作系统隔离，仿真导致的 Worker 行为仍遵守前文的独立测试环境边界。
+
 ## Oracle、Reviewer 与结果含义
 
 Oracle 断言包括接收结果、Decision 类型、Ticket 数量和终态、Worker report 状态、本地输出数量及禁止 Ticket/输出。它根据结构化 Store 快照和本地 Sink 输出计算；Reviewer 文本不会成为这些断言的输入，也不能覆盖失败。Reporter 无法读取 Runtime 快照时会明确报告 `snapshot_available: false`，依赖快照的断言失败。

@@ -83,6 +83,51 @@ it('routes a listed user stop action on an active thread through the real Engine
   expect(reporter.completeScenario('runtime-stop')).toMatchObject({ behavioral_pass: true, platform_pass: null })
 })
 
+it('waits for a resumed worker turn and an idle DSH Agent after its Ticket ends', async () => {
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  host = await startRuntime()
+  const runtime = host.runtime, reporter = runtime.reporter!
+  reporter.registerScenario({ id: 'runtime-autonomous-wait', version: 1, project_source_id: 'github', thread_id: '12', thread_kind: 'issue',
+    visible: { persona: '仓库维护者', goal: '修复登录失败' }, actors: [{ id: 'alice', role: 'person' }],
+    oracle: { assertions: [{ kind: 'receive', sequence: 1, result: 'stored' }] } })
+  const envelope = { scenario_id: 'runtime-autonomous-wait', scenario_version: 1, project_source_id: 'github', thread_id: '12',
+    actor_id: 'alice', simulated_at: '2026-11-14T00:00:00Z' }
+  const first = reporter.submit({ ...envelope, sequence: 1, idempotency_key: 'first',
+    action: { kind: 'message', text: '@agent-bot 请修复登录失败', addressed: 'mention' } })
+  await runtime.idle()
+  const accepted = await host.route({ kind: 'accept', trigger_id: first.trigger_id, title: '修复登录失败',
+    worktree_name: 'reporter-followup', acknowledgement: '收到。' })
+  await runtime.idle()
+  const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
+  await host.runTool(`worker-${ticketId}`, 'orchestrator_report', { state: 'blocked', summary: '已开始检查登录失败。', human_action: '能否提供失败时间？' })
+  host.agents.get(`worker-${ticketId}`)!.status = 'idle'
+  await runtime.pump(); await runtime.sendReplies()
+
+  const followup = reporter.submit({ ...envelope, sequence: 2, idempotency_key: 'followup',
+    action: { kind: 'message', text: '补充说明：请同时确认失败原因。' } })
+  await runtime.idle()
+  expect(runtime.store.triggers.disposition(followup.trigger_id)).toMatchObject({ fanout: [ticketId] })
+  expect(runtime.store.triggers.disposition(followup.trigger_id)).not.toHaveProperty('decisionId')
+  await host.runTool(`worker-${ticketId}`, 'orchestrator_report', { state: 'ready', summary: '已复查失败原因。' })
+  const worker = host.agents.get(`worker-${ticketId}`)!
+  worker.status = 'idle'
+  await runtime.pump(); await runtime.sendReplies()
+
+  worker.status = 'running'
+  host.agents.get(runtime.masterId)!.status = 'idle'
+  host.agents.delete(worker.id)
+  let finished = false
+  const wait = (runtime as unknown as { waitForReporterTarget(id: string, signal: AbortSignal): Promise<void> }).waitForReporterTarget
+    .call(runtime, 'runtime-autonomous-wait', new AbortController().signal).then(() => { finished = true })
+  await new Promise(resolve => setTimeout(resolve, 80))
+  expect(finished).toBe(false)
+  host.agents.set(worker.id, worker)
+  worker.status = 'idle'
+  await wait
+  expect(finished).toBe(true)
+}, 10_000)
+
 it('isolates GitHub and GitLab requests with the same number and binds an MR through its project CLI', async () => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')

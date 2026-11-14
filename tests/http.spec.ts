@@ -6,6 +6,39 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { ReporterAutonomousRunError } from '../src/reporter/autonomous.ts'
+
+it('exposes only a read-only Reporter management projection and protects autonomous run operations', async () => {
+  const token = 'reporter-test-capability-with-32-characters'
+  const view = { id: 'auto-1', status: 'running', phase: '发现可测试行为' }
+  const calls: unknown[] = []
+  const call = serve({ reporter: { token, client: { registerScenario: () => ({ registered: true }), submit: () => ({ stored: true }) } },
+    reporterRuns: {
+      start: async (input: unknown) => { calls.push(['start', input]); return view },
+      list: () => [view], get: (id: string) => id === 'auto-1' ? view : undefined,
+      cancel: (id: string) => { calls.push(['cancel', id]); if (id !== 'auto-1') throw new ReporterAutonomousRunError(404, 'run_not_found', 'Reporter 运行不存在'); return view },
+    } })
+  expect(await call('GET', 'reporter')).toEqual({ status: 200, body: { enabled: true, runs: [view] } })
+  expect(await call('POST', '../reporter/runs', { idempotency_key: 'one' })).toMatchObject({ status: 401 })
+  expect(await call('GET', '../reporter/runs', undefined, { authorization: `Bearer ${token}`, origin: 'http://evil.example' })).toMatchObject({ status: 403 })
+  expect(await call('POST', '../reporter/runs', { idempotency_key: 'one' }, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 202, body: view })
+  expect(await call('GET', '../reporter/runs', undefined, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 200, body: [view] })
+  expect(await call('GET', '../reporter/runs/auto-1', undefined, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 200, body: view })
+  expect(await call('POST', '../reporter/runs/auto-1/cancel', undefined, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 200, body: view })
+  expect(await call('GET', '../reporter/runs/missing', undefined, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 404, body: { error: 'Reporter run not found' } })
+  expect(await call('POST', '../reporter/runs/missing/cancel', undefined, { authorization: `Bearer ${token}` }))
+    .toEqual({ status: 404, body: { error: 'Reporter 运行不存在', code: 'run_not_found' } })
+  expect(calls).toEqual([['start', { idempotency_key: 'one' }], ['cancel', 'auto-1'], ['cancel', 'missing']])
+})
+
+it('reports Reporter as disabled without exposing run data when autonomous runs are unavailable', async () => {
+  expect(await serve({})('GET', 'reporter')).toEqual({ status: 200, body: { enabled: false, runs: [] } })
+})
 
 it('requires both the local request boundary and Reporter capability before accepting a scenario or event', async () => {
   const calls: unknown[] = []

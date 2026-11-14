@@ -6,3 +6,6 @@ export type { ReporterScriptResult, ReporterScriptStep } from './script.ts'
 export { runQualitativeReviewer, runUserSimulator } from './coordinator.ts'
 export type { ReporterModelBudget, ReporterModelInvoker, ReporterModelRequest, ReporterModelResponse, ReporterModelRole,
   ReporterModelUsageSummary, ReporterReviewerRunResult, ReporterSimulatorRunResult } from './coordinator.ts'
+export { ReporterAutonomousRunError, ReporterAutonomousRunRequestSchema, ReporterAutonomousRuns } from './autonomous.ts'
+export type { ReporterAutonomousFinding, ReporterAutonomousHost, ReporterAutonomousManagementView, ReporterAutonomousRunRequest,
+  ReporterAutonomousRunStatus, ReporterAutonomousRunView, ReporterReadOnlyObservation, ReporterReadOnlyProbe } from './autonomous.ts'

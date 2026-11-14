@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { ReporterError, type LocalReporter } from '../reporter/local-reporter.ts'
+import { ReporterAutonomousRunError, type ReporterAutonomousRuns } from '../reporter/autonomous.ts'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
@@ -47,6 +48,8 @@ export interface HttpHost {
   readonly ready: Promise<void>
   /** 仅显式测试配置挂载；capability 不进入任何管理视图。 */
   readonly reporter?: { client: LocalReporter; token: string }
+  /** Persistent autonomous Reporter runs; absent when the testing-only Reporter is disabled. */
+  readonly reporterRuns?: Pick<ReporterAutonomousRuns, 'start' | 'list' | 'get' | 'cancel'>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
@@ -84,6 +87,7 @@ export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number):
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof ReporterError) return [error.status, { error: error.message, code: error.code }]
+  if (error instanceof ReporterAutonomousRunError) return [error.status, { error: error.message, code: error.code }]
   if (error instanceof z.ZodError) {
     const issues = error.issues.map(issue => ({ path: issue.path.join('.'), message: issue.message }))
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
@@ -158,6 +162,7 @@ function routes(runtime: HttpHost): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'GET reporter': () => ({ enabled: !!runtime.reporterRuns, runs: runtime.reporterRuns?.list() ?? [] }),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -263,6 +268,22 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
           }
           if (req.method === 'POST' && path.length === 1 && path[0] === 'events') {
             json(res, 200, reporter.client.submit(await readBody(req, 64 * 1024))); return
+          }
+          if (path[0] === 'runs') {
+            const runs = runtime.reporterRuns
+            if (!runs) throw new RouteError(404, 'Autonomous Reporter is disabled')
+            if (req.method === 'POST' && path.length === 1) {
+              json(res, 202, await runs.start(await readBody(req, 16 * 1024))); return
+            }
+            if (req.method === 'GET' && path.length === 1) { json(res, 200, runs.list()); return }
+            if (req.method === 'GET' && path.length === 2) {
+              const run = runs.get(path[1]!)
+              if (!run) throw new RouteError(404, 'Reporter run not found')
+              json(res, 200, run); return
+            }
+            if (req.method === 'POST' && path.length === 3 && path[2] === 'cancel') {
+              json(res, 200, runs.cancel(path[1]!)); return
+            }
           }
           if (req.method === 'POST' && path.length === 3 && path[0] === 'scenarios') {
             const id = path[1]!

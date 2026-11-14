@@ -10,9 +10,14 @@ import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } f
 import type { TicketListView } from './views/tickets.ts'
 import type { LocalReporter, ReporterReview, ReporterUsage } from '../reporter/local-reporter.ts'
 import type { ReporterEnvelope, ReporterScenarioDefinition } from '../reporter/protocol.ts'
+import type { ReporterAutonomousManagementView, ReporterAutonomousRunRequest, ReporterAutonomousRunView } from '../reporter/autonomous.ts'
 
 /** 独立 capability 保护的测试接口；路径相对 /orchestrator/reporter/。 */
 export interface ReporterApi {
+  'POST runs': { body: ReporterAutonomousRunRequest; response: ReporterAutonomousRunView }
+  'GET runs': { response: ReporterAutonomousRunView[] }
+  'GET runs/:id': { response: ReporterAutonomousRunView }
+  'POST runs/:id/cancel': { response: ReporterAutonomousRunView }
   'POST scenarios': { body: ReporterScenarioDefinition; response: ReturnType<LocalReporter['registerScenario']> }
   'POST events': { body: ReporterEnvelope; response: ReturnType<LocalReporter['submit']> }
   'GET scenarios/:id': { response: ReturnType<LocalReporter['scenario']> }
@@ -34,6 +39,7 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET reporter': { response: ReporterAutonomousManagementView }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }

@@ -38,7 +38,7 @@ export interface ReporterCheckpoint {
 }
 
 export interface ReporterUsage {
-  role: 'user-simulator' | 'superagent' | 'qualitative-reviewer'
+  role: 'autonomous-explorer' | 'user-simulator' | 'browser-tester' | 'superagent' | 'qualitative-reviewer'
   model?: string
   prompt_tokens?: number
   completion_tokens?: number
@@ -147,7 +147,7 @@ const nowIso = (): string => new Date().toISOString()
 const validString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 const jsonObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
-const UsageSchema = z.object({ role: z.enum(['user-simulator', 'superagent', 'qualitative-reviewer']), model: z.string().max(200).optional(),
+const UsageSchema = z.object({ role: z.enum(['autonomous-explorer', 'user-simulator', 'browser-tester', 'superagent', 'qualitative-reviewer']), model: z.string().max(200).optional(),
   prompt_tokens: z.number().int().nonnegative().optional(), completion_tokens: z.number().int().nonnegative().optional(),
   cost_usd: z.number().nonnegative().optional(), latency_ms: z.number().nonnegative().optional(), retries: z.number().int().nonnegative().optional() }).strict()
 const ReviewSchema = z.object({ summary: z.string().min(1).max(8_000), findings: z.array(z.object({ severity: z.enum(['info', 'warning', 'error']),

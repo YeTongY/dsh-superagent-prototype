@@ -37,6 +37,9 @@ import { pullEndNotices } from '../sources/github-pull.ts'
 import { gitlabMergeRequestEndNotices } from '../sources/gitlab-pull.ts'
 import { createLocalReporter, type LocalReporter } from '../reporter/local-reporter.ts'
 import type { ReporterRuntimeSnapshot } from '../reporter/protocol.ts'
+import { ReporterAutonomousRuns, type ReporterAutonomousHost, type ReporterReadOnlyProbe } from '../reporter/autonomous.ts'
+import { createReporterBrowserDriver } from '../reporter/browser.ts'
+import { createReporterModelInvoker, resolveReporterModel } from '../reporter/dsh-model.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -76,6 +79,7 @@ export class Runtime extends Service implements SourceHost {
   readonly engine: Engine
   readonly passes: Passes
   readonly reporter?: LocalReporter
+  readonly reporterRuns?: ReporterAutonomousRuns
   private readonly reporterToken?: string
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
@@ -189,6 +193,39 @@ export class Runtime extends Service implements SourceHost {
             if (!store.triggers.get(id)) return undefined
             return store.triggers.disposition(id)?.filtered ? 'filtered' : 'stored'
           }, snapshot: (_scenario, ids) => this.reporterSnapshot(ids) })
+        const resolveReporterProject: ReporterAutonomousHost['resolveProject'] = id => {
+          if (!setup.configured() || !sources.instance(id)?.enabled) return undefined
+          const project = setup.deployment.projects?.[id]
+          if (project) return project
+          return id === 'github' ? { id, provider: 'github', host: 'github.com', project: setup.deployment.repository } : undefined
+        }
+        const browserEnabled = process.env.DSH_SUPERAGENT_REPORTER_BROWSER === '1'
+        const browser = browserEnabled ? {
+          create: (signal: AbortSignal) => {
+            // DSH owns both the listener origin and the short-lived browser login URL.
+            // Keep its token inside the browser driver's initial navigation only.
+            const host = this.ctx as unknown as { connection?: { authenticatedUrl(origin: string): string | Promise<string> } }
+            const webServer = this.ctx.webServer as typeof this.ctx.webServer & { getOrigin?: () => string }
+            const origin = webServer.getOrigin?.() ?? `${webServer.protocol}//${webServer.host}:${webServer.port}`
+            if (!host.connection?.authenticatedUrl) throw new Error('DSH connection browser authentication is unavailable')
+            return createReporterBrowserDriver({ expectedOrigin: origin, getAuthenticatedUrl: () => {
+              const url = host.connection!.authenticatedUrl(origin)
+              if (typeof url !== 'string') throw new Error('DSH browser authentication URL must be synchronous')
+              return url
+            }, signal })
+          },
+        } : undefined
+        this.reporterRuns = new ReporterAutonomousRuns({ reporter: this.reporter, enabled: true,
+          resolveProject: resolveReporterProject,
+          allowedActors: id => resolveReporterProject(id) ? store.settings().policy.sources[id]?.allowed.map(actor => actor.id) ?? [] : [],
+          safeState: id => this.reporterSafeState(id, resolveReporterProject),
+          resolveModel: async () => {
+            const route = await resolveReporterModel(ctx)
+            return { ...route, invoke: createReporterModelInvoker(ctx, route) }
+          },
+          waitForSuperagent: (scenarioId, signal) => this.waitForReporterTarget(scenarioId, signal),
+          probeReadOnly: (probe, signal) => this.probeReporterReadOnly(probe, signal),
+          ...(browser ? { browser } : {}), lifetime: this.lifetime, stateDir: machine.stateDir })
       }
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
@@ -262,6 +299,130 @@ export class Runtime extends Service implements SourceHost {
         ...ticket.attention ? { attention: { question: ticket.attention.question, ...ticket.attention.triggerId ? { triggerId: ticket.attention.triggerId } : {} } } : {} }))
     return { triggers, decisions, tickets }
   }
+  /** A project-scoped, credential-free summary shown only to the autonomous Reporter. */
+  private reporterSafeState(id: string, resolveProject: ReporterAutonomousHost['resolveProject']): unknown {
+    const project = resolveProject(id)
+    if (!project) return { available: false }
+    const tickets = this.store.tickets.list().filter(ticket => this.store.triggers.get(ticket.origin.triggerId)?.source === id)
+    const threads = this.store.threads.list().filter(thread => thread.ref.source === id)
+    const health = Object.fromEntries(Object.entries(this.health).filter(([name]) => name === 'runtime' || name === id || name.endsWith(`:${id}`))
+      .map(([name, value]) => [name, value.state]))
+    return { available: true, project: { id: project.id, provider: project.provider, host: project.host, project: project.project },
+      paused: this.store.settings().paused, health, open_tickets: tickets.filter(ticket => !ticket.ended).length,
+      ended_tickets: tickets.filter(ticket => !!ticket.ended).length, active_threads: threads.length,
+      allowed_actors: this.store.settings().policy.sources[id]?.allowed.length ?? 0 }
+  }
+  /** Wait for Engine dispositions, effects, and the real DSH sessions touched by one Reporter scenario. */
+  private async waitForReporterTarget(scenarioId: string, signal: AbortSignal): Promise<void> {
+    const reporter = this.reporter
+    if (!reporter) throw Object.assign(new Error('Reporter is disabled'), { code: 'reporter_disabled' })
+    const sessions = new Set<string>([this.masterId])
+    const failedSessions = new Set<string>()
+    let targetFailed = false
+    const dispose = this.ctx.on('agent/error', ({ agent }) => {
+      failedSessions.add(agent.id)
+      if (sessions.has(agent.id)) targetFailed = true
+    })
+    const abortable = async <T>(promise: Promise<T>): Promise<T> => {
+      signal.throwIfAborted()
+      let onAbort: (() => void) | undefined
+      const aborted = new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'))
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+      try { return await Promise.race([promise, aborted]) }
+      finally { if (onAbort) signal.removeEventListener('abort', onAbort) }
+    }
+    const delay = (ms: number) => new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
+      const onAbort = () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError')) }
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      let quietPasses = 0
+      while (quietPasses < 2) {
+        signal.throwIfAborted()
+        if (targetFailed) throw Object.assign(new Error('A target DSH session failed'), { code: 'target_agent_error' })
+        await abortable(this.passes.idle())
+        await abortable(this.effects.idle())
+        const scenario = reporter.scenario(scenarioId)
+        if (!scenario) throw Object.assign(new Error('Reporter scenario is missing'), { code: 'scenario_not_found' })
+        const scenarioTriggerIds = new Set(scenario.inputs.map(input => input.trigger.id))
+        const ticketIds = new Set<string>()
+        let pending = scenario.inputs.length === 0
+        for (const input of scenario.inputs) {
+          const disposition = this.store.triggers.disposition(input.trigger.id)
+          if (!disposition) { pending = true; continue }
+          if (disposition.filtered) continue
+          const owners = [...new Set([...disposition.fanout.filter(id => !disposition.context?.includes(id)), ...(disposition.acked ?? [])])]
+          for (const id of owners) ticketIds.add(id)
+          if (disposition.decisionId) {
+            const decision = this.store.decisions.get(disposition.decisionId)
+            if (!decision) { pending = true; continue }
+            if (decision.ticketId) ticketIds.add(decision.ticketId)
+            if ((decision.kind === 'accept' || decision.kind === 'reopen') && !decision.ticketId && !owners.length) pending = true
+          } else if (!owners.length) pending = true
+        }
+        for (const id of ticketIds) {
+          const ticket = this.store.tickets.get(id)
+          if (!ticket) { pending = true; continue }
+          const sessionId = workerSessionId(id)
+          sessions.add(sessionId)
+          if (failedSessions.has(sessionId)) targetFailed = true
+          const agent = this.ctx.agents.get(sessionId as SessionId)
+          const ended = ticket.ended || ticket.assignments.at(-1)?.state === 'ended'
+          if (ended) {
+            // A domain terminal event can precede final DSH handling; a missing Agent is not proof that its Session finished.
+            if (!agent || agent.status !== 'idle') pending = true
+            continue
+          }
+          const assignment = ticket.assignments.at(-1)
+          const report = assignment?.report
+          const undelivered = ticket.inputs.some(input => input.kind === 'trigger' && scenarioTriggerIds.has(input.triggerId)
+            && (ticket.undelivered.includes(input.id) || !input.deliveredTo))
+          const reportPredatesDelivery = !!assignment?.deliveredAt && !!report && assignment.deliveredAt >= report.at
+          if (undelivered || !report || report.state === 'progress' || reportPredatesDelivery || !agent || agent.status !== 'idle') pending = true
+        }
+        const master = this.ctx.agents.get(this.masterId as SessionId)
+        if (!master || master.status !== 'idle') pending = true
+        if (targetFailed) throw Object.assign(new Error('A target DSH session failed'), { code: 'target_agent_error' })
+        if (pending) quietPasses = 0
+        else quietPasses++
+        if (quietPasses < 2) await delay(50)
+      }
+    } finally { dispose() }
+  }
+  /** Fixed-path, bounded loopback probe; the model cannot supply a URL, method, or request headers. */
+  private async probeReporterReadOnly(probe: ReporterReadOnlyProbe, signal: AbortSignal) {
+    const paths: Record<ReporterReadOnlyProbe, string> = { state: 'state', overview: 'overview', sources: 'sources', tickets: 'tickets',
+      threads: 'threads', decisions: 'decisions' }
+    const server = this.ctx.webServer as typeof this.ctx.webServer & { getOrigin?: () => string }
+    const origin = server.getOrigin?.() ?? `${server.protocol}//${server.host}:${server.port}`
+    const response = await fetch(new URL(`/orchestrator/api/${paths[probe]}`, origin), { method: 'GET', cache: 'no-store', redirect: 'error', signal,
+      headers: { 'x-orchestrator-request': '1' } })
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    let body = '', size = 0, truncated = false
+    if (reader) {
+      try {
+        while (true) {
+          const item = await reader.read()
+          if (item.done) break
+          const remaining = 16 * 1024 - size
+          if (item.value.byteLength > remaining) {
+            body += decoder.decode(item.value.subarray(0, Math.max(0, remaining)), { stream: true })
+            size = 16 * 1024; truncated = true
+            await reader.cancel()
+            break
+          }
+          size += item.value.byteLength
+          body += decoder.decode(item.value, { stream: true })
+        }
+      } finally { body += decoder.decode() }
+    }
+    if (truncated) body += '\n[响应已截断]'
+    return { probe_id: probe, status: response.status, body, json: response.headers.get('content-type')?.includes('application/json') ?? false }
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
@@ -291,6 +452,7 @@ export class Runtime extends Service implements SourceHost {
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       ...this.reporter && this.reporterToken ? { reporter: { client: this.reporter, token: this.reporterToken } } : {},
+      get reporterRuns() { return runtime.reporterRuns },
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

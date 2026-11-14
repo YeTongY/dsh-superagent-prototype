@@ -54,6 +54,19 @@ DSH 启动日志可能打印带 `?token=...` 的登录 URL，因此 `docker comp
 
 确认 profile 后，首次在 DeepSeek Harness 的 Settings → Models 配置并选择模型。DSH 的 Models 页面会将 API key 放在 /data/dsh/.credentials.yaml，这是持久数据；同时保护宿主数据目录的读取权限。模型 key 也可由 Docker 运行时 Secret/环境变量提供，但不要放入 Dockerfile、Git 或被提交的 Compose 文件。
 
+## 可选真实浏览器
+
+默认镜像不下载浏览器。需要报告者实际操作管理页面时，构建时显式开启：
+
+```sh
+docker compose build --build-arg REPORTER_BROWSER=1
+docker compose up -d
+```
+
+该构建安装固定 Playwright 版本对应的 Chromium 与系统依赖，仍以 `node` 用户运行。使用默认镜像启动浏览器测试会明确报告依赖不可用，不会把只读 HTTP 结果写成 UI 验收通过。浏览器进程使用临时上下文，结束后关闭，不读取或修改宿主 Firefox 配置；VPN 仍由宿主提供。
+
+页面认证通过当前 DSH 官方 Connection 接口取得临时登录地址，并在浏览器内部完成 Cookie 交换，登录地址不会交给模型或普通日志。浏览器模型只接收管理面板的有界可访问树和结构化动作结果，不接收认证配置。浏览器安装会增加镜像体积和运行内存；应分别记录接口、UI、仿真和真实平台的测试证据。
+
 ## 首个项目：本项目的 GitHub fork
 
 先在容器里登录专用 Agent GitHub 身份：
@@ -87,7 +100,7 @@ Reporter 默认关闭。确认自己通过 loopback 或 SSH 隧道访问后，�
     chmod 600 docker/runtime.env
     docker compose up -d
 
-通过 POST /orchestrator/reporter/scenarios 注册以首个 GitHub 项目 ID 为 project_source_id 的场景，再用 POST /orchestrator/reporter/events 提交动作；细节见[本地 Reporter 文档](010-local-reporter.md)。Reporter 动作走真实 Runtime/Engine，场景回复由本地 Sink 捕获。运行 LLM User Simulator 或 Reviewer 仍需外部调用方注入模型函数；启用 Reporter 不会自动发起付费调用。
+通过 POST /orchestrator/reporter/scenarios 注册以首个 GitHub 项目 ID 为 project_source_id 的场景，再用 POST /orchestrator/reporter/events 提交动作；细节见[本地 Reporter 文档](010-local-reporter.md)。Reporter 动作走真实 Runtime/Engine，场景回复由本地 Sink 捕获。固定脚本仍可通过现有场景接口运行。自主测试使用 `POST /orchestrator/reporter/runs` 提交产品目标、项目、权限和预算，直接复用 DSH 原生模型服务；启用 Reporter 本身不会自动发起付费调用，重启也不会恢复收费任务。管理页概览展示实际运行阶段与发现。
 
 检查行为和配置后移除 Reporter 开关与 Token 并重启。platform_pass 在本地 Reporter 中保持 null。真实 GitHub 评论交付、git push、分支保护和模型驱动自举是不同的验收步骤；不要把容器健康或本地 Reporter 通过当成它们已经通过。
 
