@@ -104,7 +104,7 @@ it('stops before submitting a generated action when required model cost is unkno
   expect(reporter.scenario('coordinator-scenario')?.usage[0]).toMatchObject({ role: 'user-simulator', latency_ms: expect.any(Number) })
 })
 
-it('does not invoke a fake Simulator after cancellation and marks a stalled model call with unknown cost', async () => {
+it('does not invoke a fake Simulator after cancellation and keeps a silent model call alive past the reminder window', async () => {
   const cancelledReporter = createReporter(), cancelled = new AbortController(), cancelledInvoke = vi.fn(async () => actionResponse)
   cancelled.abort()
   const cancelledResult = await runUserSimulator({ reporter: cancelledReporter, scenarioId: 'coordinator-scenario', invoke: cancelledInvoke,
@@ -114,13 +114,25 @@ it('does not invoke a fake Simulator after cancellation and marks a stalled mode
   expect(cancelledInvoke).not.toHaveBeenCalled()
 
   vi.useFakeTimers()
-  const timeoutReporter = createReporter(), timeoutInvoke: ReporterModelInvoker = async () => new Promise(() => {})
+  const timeoutReporter = createReporter(), onProgress = vi.fn()
+  let modelSignal: AbortSignal | undefined, settled = false
+  const timeoutInvoke: ReporterModelInvoker = async request => {
+    modelSignal = request.signal
+    await new Promise(resolve => setTimeout(resolve, 60))
+    return finishResponse
+  }
   const pending = runUserSimulator({ reporter: timeoutReporter, scenarioId: 'coordinator-scenario', invoke: timeoutInvoke,
-    waitForSuperagent: async () => {}, budget: { max_cost_usd: 1, timeout_ms: 20 } })
+    waitForSuperagent: async () => {}, budget: { max_calls: 2, max_cost_usd: 1, timeout_ms: 20 }, onProgress })
+  void pending.then(() => { settled = true })
   await vi.advanceTimersByTimeAsync(20)
+  expect(settled).toBe(false)
+  expect(modelSignal?.aborted).toBe(false)
+  expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'no_progress' }))
+  await vi.advanceTimersByTimeAsync(40)
   const timeoutResult = await pending
 
-  expect(timeoutResult).toMatchObject({ stop_reason: 'progress_stalled', usage: { calls: 1, cost_usd: null } })
+  expect(timeoutResult).toMatchObject({ status: 'completed', stop_reason: 'simulator_finished', usage: { calls: 1, cost_usd: 0.001 } })
+  expect(modelSignal?.aborted).toBe(false)
   expect(timeoutReporter.scenario('coordinator-scenario')?.usage[0]).toMatchObject({ role: 'user-simulator', latency_ms: expect.any(Number) })
 })
 

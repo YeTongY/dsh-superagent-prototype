@@ -289,6 +289,9 @@ function ReporterRun({ run }: { run: ReporterAutonomousRunView }) {
         <strong>{t(progressKindKeys[run.progress.kind])}</strong>
         <When at={run.progress.at} />
       </div>}
+      {run.status === 'running' && run.stalled && <p className="dt-reporter-reason dt-reporter-no-progress" role="status">
+        {t('reporter.noProgressWarning')}
+      </p>}
       <div className="dt-reporter-meta">
         <span title={run.project_source_id}>{t('reporter.projectLabel')} <b>{run.project_source_id}</b></span>
         <span title={`${run.model.provider}/${run.model.model}`}>{t('reporter.modelLabel')} <b>{run.model.provider}/{run.model.model}</b></span>

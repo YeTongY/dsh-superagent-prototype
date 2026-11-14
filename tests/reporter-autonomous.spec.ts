@@ -118,7 +118,7 @@ it('keeps simulation active across multiple inactivity windows while the target 
   expect(waits).toBe(3)
 })
 
-it('stops an autonomous run after a real no-progress window and keeps cancellation distinct', async () => {
+it('marks a silent autonomous run without cancelling it and keeps explicit cancellation distinct', async () => {
   vi.useFakeTimers()
   const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
   const stalledInvoke: ReporterModelInvoker = request => new Promise((_resolve, reject) => {
@@ -128,7 +128,10 @@ it('stops an autonomous run after a real no-progress window and keeps cancellati
   const stalled = await stalledRuns.start(request({ mode: 'real-service', permissions: { read_only_service: true },
     budget: { max_model_calls: 8, max_actions: 4, max_experiments: 1, max_total_tokens: 20_000, timeout_ms: 5_000 } }))
   await vi.advanceTimersByTimeAsync(5_000)
-  expect(stalledRuns.get(stalled.id)).toMatchObject({ status: 'incomplete', error_code: 'progress_stalled', report_delivery: { status: 'delivered' } })
+  expect(stalledRuns.get(stalled.id)).toMatchObject({ status: 'running', stalled: true, model_calls: 1, report_delivery: { status: 'pending' } })
+  stalledRuns.cancel(stalled.id)
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+  expect(stalledRuns.get(stalled.id)).toMatchObject({ status: 'cancelled', report_delivery: { status: 'delivered' } })
 
   const ignoredAbortInvoke: ReporterModelInvoker = () => new Promise(() => {})
   const cancelHost = fakeHost(directory, ignoredAbortInvoke), cancelRuns = new ReporterAutonomousRuns(cancelHost)
@@ -137,6 +140,36 @@ it('stops an autonomous run after a real no-progress window and keeps cancellati
   cancelRuns.cancel(cancelled.id)
   for (let i = 0; i < 20; i++) await Promise.resolve()
   expect(cancelRuns.get(cancelled.id)).toMatchObject({ status: 'cancelled', report_delivery: { status: 'delivered' } })
+})
+
+it('clears the no-progress warning when a long model inference finally returns', async () => {
+  vi.useFakeTimers()
+  const directory = mkdtempSync(join(tmpdir(), 'reporter-autonomous-')); directories.push(directory)
+  let modelSignal: AbortSignal | undefined
+  const invoke: ReporterModelInvoker = async request => {
+    if (request.role === 'autonomous-explorer') {
+      modelSignal = request.signal
+      await new Promise(resolve => setTimeout(resolve, 12_000))
+      return { output: { kind: 'real-service', hypothesis: '检查运行状态接口', probe_id: 'state' }, usage }
+    }
+    return { output: { summary: '运行状态接口返回正常。', findings: [] }, usage }
+  }
+  const runs = new ReporterAutonomousRuns(fakeHost(directory, invoke))
+  const initial = await runs.start(request({ mode: 'real-service', permissions: { read_only_service: true },
+    budget: { max_model_calls: 8, max_actions: 4, max_experiments: 1, max_total_tokens: 20_000, timeout_ms: 5_000 } }))
+
+  await vi.advanceTimersByTimeAsync(5_000)
+  expect(runs.get(initial.id)).toMatchObject({ status: 'running', stalled: true, model_calls: 1 })
+  expect(modelSignal?.aborted).toBe(false)
+
+  await vi.advanceTimersByTimeAsync(7_000)
+  for (let i = 0; i < 100 && runs.get(initial.id)!.status === 'running'; i++) {
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+  }
+  expect(runs.get(initial.id)).toMatchObject({ status: 'completed', stalled: false, model_calls: 2,
+    report_delivery: { status: 'delivered' } })
+  expect(modelSignal?.aborted).toBe(false)
 })
 
 it('autonomously selects a simulation, performs two actions with real feedback, reviews it and keeps completed idempotency', async () => {

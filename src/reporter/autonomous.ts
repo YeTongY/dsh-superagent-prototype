@@ -12,13 +12,13 @@ import { ReporterBrowserActionSchema, type ReporterBrowserAction, type ReporterB
 import { stableJson } from './protocol.ts'
 import type { ReporterOutputKind } from './protocol.ts'
 import type { ReporterScenarioDefinition } from './protocol.ts'
-import { ReporterProgressStalledError, ReporterProgressWatchdog, type ReporterProgressKind } from './progress.ts'
+import { ReporterProgressMonitor, type ReporterProgressKind } from './progress.ts'
 
 const projectSourceId = z.string().regex(/^[a-z][a-z0-9-]{0,99}$/)
 
 const ReporterBudgetSchema = z.object({ max_model_calls: z.number().int().min(2).max(20).default(8), max_actions: z.number().int().min(2).max(12).default(4),
   max_experiments: z.number().int().min(1).max(2).default(1), max_total_tokens: z.number().int().min(100).max(100_000).default(20_000),
-  /** 最长连续无真实进展窗口，不是运行总时限。 */
+  /** 连续无真实进展提醒窗口；超过后只标记运行状态，不自动取消。 */
   timeout_ms: z.number().int().min(5_000).max(600_000).default(600_000) }).strict().prefault({})
 
 export const ReporterAutonomousRunRequestSchema = z.object({
@@ -102,6 +102,7 @@ export interface ReporterAutonomousRunView {
   started_at: string
   updated_at: string
   progress?: { at: string; kind: ReporterProgressKind }
+  stalled?: boolean
   model: { provider: string; model: string; reasoningEffort: 'medium' }
   experiments: number
   turns: number
@@ -249,9 +250,9 @@ export class ReporterAutonomousRuns {
       rejectPending(error); throw error
     }
     this.pendingStarts.delete(request.idempotency_key); resolvePending(cloneView(view))
-    const watchdog = new ReporterProgressWatchdog(request.budget.timeout_ms)
-    const signal = AbortSignal.any([controller.signal, this.host.lifetime, watchdog.signal])
-    void this.execute(record, request, signal, route.invoke, watchdog).catch(error => {
+    const progressMonitor = new ReporterProgressMonitor(request.budget.timeout_ms, () => this.markNoProgress(record))
+    const signal = AbortSignal.any([controller.signal, this.host.lifetime])
+    void this.execute(record, request, signal, route.invoke, progressMonitor).catch(error => {
       if (record.view.status === 'running') this.update(record, { status: signal.aborted ? 'cancelled' : 'failed', phase: '结束', error_code: safeCode(error) })
     }).finally(() => { if (this.active === id) this.active = undefined })
     return cloneView(view)
@@ -335,7 +336,7 @@ export class ReporterAutonomousRuns {
   private file(id: string): string { return join(this.directory, `${hash(id)}.jsonl`) }
 
   private async execute(record: RunRecord, request: ReporterAutonomousRunRequest, signal: AbortSignal, modelInvoker: ReporterModelInvoker,
-    watchdog: ReporterProgressWatchdog): Promise<void> {
+    progressMonitor: ReporterProgressMonitor): Promise<void> {
     const { view } = record, scenarios: string[] = [], actor = this.host.allowedActors(request.project_source_id)[0]
     const observations: ReporterExperimentEvidence[] = []
     let calls = 0, tokens = 0, tokenKnown = true, tokenBudgetExceeded = false, actions = 0, experiments = 0, finalSummary = '', incompleteReason = ''
@@ -354,10 +355,10 @@ export class ReporterAutonomousRuns {
         response = await abortable(modelInvoker({ ...modelRequest, remaining_budget: budgetLeft(), onProgress: () => {
           if (signal.aborted || record.view.status !== 'running') return
           forward?.()
-          this.recordProgress(record, watchdog, 'model_stream')
+          this.recordProgress(record, progressMonitor, 'model_stream')
         } }), signal)
         signal.throwIfAborted()
-        this.recordProgress(record, watchdog, 'model_call')
+        this.recordProgress(record, progressMonitor, 'model_call')
       }
       catch (error) { this.updateModelUsage(record, undefined, Date.now() - started); throw error }
       const usage = parseUsage(response.usage)
@@ -409,9 +410,10 @@ export class ReporterAutonomousRuns {
             waitForSuperagent: (childSignal, onProgress) => this.host.waitForSuperagent(scenarioId, childSignal, onProgress), maxTurns: remainingActions, minTurns: 2,
             onProgress: progress => {
               if (progress.phase === 'model_stream' || progress.phase === 'model_call') return // 已由统一模型调用边界记录。
-              if (progress.phase === 'target_state') { this.recordProgress(record, watchdog, 'target_state'); return }
-              if (progress.phase === 'action_submitted') this.recordProgress(record, watchdog, 'user_action')
-              if (progress.phase === 'target_completed') this.recordProgress(record, watchdog, 'target_state')
+              if (progress.phase === 'no_progress') { this.markNoProgress(record); return }
+              if (progress.phase === 'target_state') { this.recordProgress(record, progressMonitor, 'target_state'); return }
+              if (progress.phase === 'action_submitted') this.recordProgress(record, progressMonitor, 'user_action')
+              if (progress.phase === 'target_completed') this.recordProgress(record, progressMonitor, 'target_state')
               const phase = progress.phase === 'target_waiting' ? '等待被测 Superagent' : progress.phase === 'target_completed' ? '读取目标真实回复' : '提交仿真用户动作'
               this.update(record, { phase, turns: actions + progress.turns })
               if (progress.phase === 'action_submitted' || progress.phase === 'target_completed') {
@@ -463,7 +465,7 @@ export class ReporterAutonomousRuns {
           this.update(record, { phase: '调用只读管理服务' })
           const first = await this.host.probeReadOnly(decision.probe_id, signal)
           const second = first.status >= 500 ? await this.host.probeReadOnly(decision.probe_id, signal) : undefined
-          this.recordProgress(record, watchdog, 'service_probe')
+          this.recordProgress(record, progressMonitor, 'service_probe')
           const evidence = `GET ${decision.probe_id} returned ${first.status}; json=${first.json}; ${first.body.slice(0, 2_000)}`
           const experiment = { kind: 'real-service' as const, hypothesis: decision.hypothesis, observation: evidence,
             evidence: [`GET /orchestrator/api/${decision.probe_id}`, `HTTP ${first.status}`, ...(second ? [`重复 GET HTTP ${second.status}`] : [])] }
@@ -477,7 +479,7 @@ export class ReporterAutonomousRuns {
         } else {
           if (!request.permissions.browser || !this.host.browser) throw new ReporterAutonomousRunError(503, 'browser_unavailable', '浏览器测试驱动不可用')
           const experiment = await this.runBrowserExperiment(record, decision.hypothesis, request, signal, invoke,
-            () => ({ known: tokenKnown, exceeded: tokenBudgetExceeded }), watchdog)
+            () => ({ known: tokenKnown, exceeded: tokenBudgetExceeded }), progressMonitor)
           if (experiment) {
             observations.push(experiment); this.updateExperiment(record, logIndex, experiment)
             if (experiment.incomplete) incompleteReason ||= experiment.error_code ?? 'browser_action_budget'
@@ -520,16 +522,15 @@ export class ReporterAutonomousRuns {
         ...(!tokenKnown ? { error_code: 'usage_unknown' } : tokenBudgetExceeded ? { error_code: 'token_budget_exceeded' } : incompleteReason ? { error_code: incompleteReason } : {}) })
     } catch (error) {
       const cancelled = record.controller.signal.aborted || this.host.lifetime.aborted
-      const stalled = watchdog.stalled || error instanceof ReporterProgressStalledError
-      const errorCode = stalled ? 'progress_stalled' : safeCode(error)
-      this.update(record, { status: cancelled ? 'cancelled' : (stalled || isExpectedIncomplete(error)) ? 'incomplete' : 'failed', phase: '结束',
+      const errorCode = safeCode(error)
+      this.update(record, { status: cancelled ? 'cancelled' : isExpectedIncomplete(error) ? 'incomplete' : 'failed', phase: '结束',
         error_code: errorCode, summary: finalSummary || summaryFrom(observations) })
       if (!cancelled) { const invalidTest = isInvalidTestCode(errorCode)
         this.addFinding(view, { severity: 'warning', status: invalidTest ? 'invalid-test' : 'candidate',
           title: invalidTest ? '自主测试输出或权限未通过校验' : '自主测试遇到模型、运行环境或目标错误', evidence: [errorCode], reproduction: [] })
         this.update(record, { findings: view.findings }) }
     } finally {
-      watchdog.dispose()
+      progressMonitor.dispose()
       await this.deliverTerminalReport(record)
     }
   }
@@ -571,12 +572,12 @@ export class ReporterAutonomousRuns {
   }
 
   private async runBrowserExperiment(record: RunRecord, hypothesis: string, request: ReporterAutonomousRunRequest, signal: AbortSignal,
-    invoke: ReporterModelInvoker, budgetState: () => { known: boolean; exceeded: boolean }, watchdog: ReporterProgressWatchdog)
+    invoke: ReporterModelInvoker, budgetState: () => { known: boolean; exceeded: boolean }, progressMonitor: ReporterProgressMonitor)
     : Promise<ReporterAutonomousExperiment & { incomplete?: boolean; error_code?: string } | undefined> {
     const driver = await this.host.browser!.create(signal), evidence: string[] = [], lines: string[] = []
     try {
       let page = await driver.observe(signal)
-      this.recordProgress(record, watchdog, 'browser_observation')
+      this.recordProgress(record, progressMonitor, 'browser_observation')
       let successfulControlActions = 0
       const browserSteps: ReporterAutonomousBrowserStep[] = []
       const logIndex = record.view.experiment_log.length - 1
@@ -625,7 +626,7 @@ export class ReporterAutonomousRuns {
           let result: 'completed' | 'failed' | 'observed' = 'completed', errorCode: string | undefined
           try {
             const actionResult = await driver.act(step.action, signal)
-            this.recordProgress(record, watchdog, step.action.kind === 'snapshot' ? 'browser_observation' : 'browser_action')
+            this.recordProgress(record, progressMonitor, step.action.kind === 'snapshot' ? 'browser_observation' : 'browser_action')
             page = actionResult.observation
             if (step.action.kind === 'snapshot') result = 'observed'
             else successfulControlActions++
@@ -634,10 +635,10 @@ export class ReporterAutonomousRuns {
             if (!['browser_action_not_unique', 'browser_action_failed'].includes(code)) throw error
             result = 'failed'; errorCode = code
             page = await driver.observe(signal)
-            this.recordProgress(record, watchdog, 'browser_observation')
+            this.recordProgress(record, progressMonitor, 'browser_observation')
           }
           recordObservation(step.action, result, page, errorCode)
-        } else { page = await driver.observe(signal); this.recordProgress(record, watchdog, 'browser_observation') }
+        } else { page = await driver.observe(signal); this.recordProgress(record, progressMonitor, 'browser_observation') }
         if (step.kind === 'observe') recordObservation({ kind: 'snapshot' }, 'observed', page)
       }
       return { kind: 'browser', hypothesis, observation: browserObservationSummary(browserSteps, '浏览器动作预算已耗尽。'), evidence, browser_steps: browserSteps, incomplete: true,
@@ -646,12 +647,19 @@ export class ReporterAutonomousRuns {
   }
 
   /** Token 增量只改内存；真实动作边界会由紧随其后的实验/阶段更新持久化。 */
-  private recordProgress(record: RunRecord, watchdog: ReporterProgressWatchdog, kind: ReporterProgressKind): void {
+  private recordProgress(record: RunRecord, progressMonitor: ReporterProgressMonitor, kind: ReporterProgressKind): void {
     if (record.view.status !== 'running') return
-    watchdog.pulse()
+    const wasStalled = record.view.stalled === true
+    progressMonitor.pulse()
     const at = this.now(), progress = { at, kind }
     record.view.progress = progress
+    record.view.stalled = false
     const nowMs = Date.now()
+    if (wasStalled) {
+      record.progressPersistedAtMs = nowMs
+      this.update(record, { progress, stalled: false })
+      return
+    }
     // 动作/阶段边界紧随其后会持久化完整 RunView；状态流事件单独节流到最多每分钟一次。
     if (kind !== 'model_stream' && kind !== 'target_state') {
       record.progressPersistedAtMs = nowMs
@@ -661,6 +669,11 @@ export class ReporterAutonomousRuns {
       record.progressPersistedAtMs = nowMs
       this.update(record, { progress })
     }
+  }
+
+  private markNoProgress(record: RunRecord): void {
+    if (record.view.status !== 'running' || record.view.stalled) return
+    this.update(record, { stalled: true })
   }
 
   private pushExperiment(record: RunRecord, value: ReporterAutonomousRunView['experiment_log'][number]): void {

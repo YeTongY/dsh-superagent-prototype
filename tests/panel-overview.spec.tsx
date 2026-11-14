@@ -287,6 +287,19 @@ it('shows the latest real progress timestamp and localized progress kind', async
     kinds.map((_, index) => `2026-11-14T00:00:0${index}.000Z`))
 })
 
+it('shows a no-progress reminder while keeping the autonomous run active', async () => {
+  const run = autonomousRun('reasoning-without-stream', 'running')
+  run.stalled = true
+  run.progress = { at: '2026-11-14T00:00:00.000Z', kind: 'model_call' }
+  server.reporter = { enabled: true, runs: [run] }
+  await mount()
+
+  expect(all('.dt-reporter-status')[0]?.textContent).toBe(zh['reporter.status.running'])
+  expect(all('.dt-reporter-no-progress')).toHaveLength(1)
+  expect(all('.dt-reporter-no-progress')[0]?.textContent).toContain('运行仍在继续')
+  expect(all('.dt-reporter-reason')).toHaveLength(1)
+})
+
 it('explains stalled progress separately from a legacy run timeout', async () => {
   const stalled = { ...autonomousRun('stalled', 'incomplete'), error_code: 'progress_stalled' }
   const legacyTimeout = { ...autonomousRun('legacy-timeout', 'incomplete'), error_code: 'run_timeout' }

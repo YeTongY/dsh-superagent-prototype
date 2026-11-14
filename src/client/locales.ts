@@ -185,6 +185,8 @@ const TEXT = {
   'reporter.updatedShort': ['更新于', 'Updated'],
   'reporter.progressMetrics': ['Reporter 测试进度', 'Reporter test progress'],
   'reporter.lastRealProgress': ['最近真实进展', 'Most recent real progress'],
+  'reporter.noProgressWarning': ['已超过无进展提醒时间，但运行仍在继续。模型推理期间可能暂时没有输出；这只是提醒，不会停止运行。',
+    'The no-progress reminder window passed, but the run is still active. Model reasoning may be temporarily silent; this is only a reminder and will not stop the run.'],
   'reporter.progressKind.modelStream': ['模型输出', 'Model output'],
   'reporter.progressKind.modelCall': ['模型调用完成', 'Model call completed'],
   'reporter.progressKind.userAction': ['用户动作完成', 'User action completed'],
