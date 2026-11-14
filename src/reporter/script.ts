@@ -1,6 +1,6 @@
 /** 低成本、确定性的 Reporter 用户模拟器；脚本运行时不调用模型。 */
 import { z } from 'zod'
-import { REPORTER_ERROR_CODES, type ReporterErrorCode, type ReporterUsage } from './local-reporter.ts'
+import { REPORTER_ERROR_CODES, type ReporterErrorCode } from './local-reporter.ts'
 import type { LocalReporter } from './local-reporter.ts'
 import type { ReporterAck, ReporterAction, ReporterSimulatorScenario } from './protocol.ts'
 import { ReporterActionSchema } from './protocol.ts'
@@ -8,7 +8,7 @@ import { ReporterActionSchema } from './protocol.ts'
 export const ReporterScriptStepSchema = z.object({
   actor_id: z.string().min(1).max(160),
   action: z.unknown(),
-  /** 只推进场景模拟时间，不触发真实等待。需要延迟轮询时由外层 coordinator 调度下一次 run。 */
+  /** 只推进场景模拟时间，不触发真实等待。 */
   after_ms: z.number().int().nonnegative().max(86_400_000).default(0),
   /** 显式序号可构造乱序、缺号和旧消息场景；不指定时使用下一个成功序号。 */
   sequence: z.number().int().positive().optional(),
@@ -25,8 +25,6 @@ export interface ReporterScriptResult {
   rejected: number
   acks: ReporterAck[]
   errors: { step: number; code: string }[]
-  simulator_cost_usd: 0
-  model_calls: 0
 }
 
 const StepsSchema = z.array(ReporterScriptStepSchema).max(2_000)
@@ -36,7 +34,7 @@ const StepsSchema = z.array(ReporterScriptStepSchema).max(2_000)
  * 可用 `expect_error` 覆盖越界 Actor、乱序事件和无效交付请求，已接受事件的序号仍严格递增。
  */
 export function runReporterScript(options: {
-  reporter: Pick<LocalReporter, 'submit' | 'recordUsage'>
+  reporter: Pick<LocalReporter, 'submit'>
   scenario: ReporterSimulatorScenario
   steps: unknown
   simulatedStart?: string
@@ -75,10 +73,7 @@ export function runReporterScript(options: {
       throw new Error(`Reporter 脚本第 ${index + 1} 步预期 ${raw.expect_error}，但动作已被接受`)
     }
   }
-  const usage: ReporterUsage = { role: 'user-simulator', model: 'deterministic-script', prompt_tokens: 0, completion_tokens: 0,
-    cost_usd: 0, latency_ms: 0, retries: 0 }
-  options.reporter.recordUsage(options.scenario.id, usage)
-  return { scenario_id: options.scenario.id, accepted, duplicate_responses: duplicates, rejected, acks, errors, simulator_cost_usd: 0, model_calls: 0 }
+  return { scenario_id: options.scenario.id, accepted, duplicate_responses: duplicates, rejected, acks, errors }
 }
 
 /** 为场景 fixture 声明经过校验的 typed action；Actor 是否属于场景由 Reporter 在提交时再次验证。 */

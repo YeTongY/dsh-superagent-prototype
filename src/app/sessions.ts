@@ -20,6 +20,7 @@ import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import { ticketShell } from '../infra/ticket-shell.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
+import type { ReporterSessionContext } from '../reporter/autonomous.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -35,18 +36,33 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
-  /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
-  tools(agent: Agent, ticket?: Ticket): Tool[]
+  /** Tools to register on the main, worker, or explicitly identified Reporter Session. */
+  tools(agent: Agent, ticket?: Ticket, reporter?: ReporterSessionContext): Tool[]
+  /** Reporter run metadata; DSH remains the owner of the Session itself. */
+  reporter?(sessionId: string): ReporterSessionContext | undefined
+}
+
+function reporterInstructions(context: ReporterSessionContext): string {
+  const { request, view, scenario_id: scenarioId } = context
+  return [
+    '你是本地自动测试 Reporter。你会像真实用户一样观察产品、选择动作、检查实际反馈，并向编排者说明值得关注的问题。',
+    `运行：${view.id}；ProjectSource：${request.project_source_id}；目标：${request.goal}`,
+    `授权能力：${JSON.stringify(request.permissions)}${scenarioId ? `；本地仿真场景：${scenarioId}` : ''}`,
+    '只使用当前 DSH Session 提供的只读文件观察和 Reporter 工具。仿真动作必须经 LocalReporter/Runtime/Engine，等待 Superagent 的真实响应；不得伪造回复、直接修改业务状态或发布平台消息。',
+    '如果绑定了执行者工单，当前 Workspace 就是对应执行目录；只读检查实现和测试，不要修改文件。',
+    '发现候选问题或需要补充信息时调用 reporter_candidate。Orchestrator 可以通过本 Session 回答你；Reporter 无权决定创建工单。',
+    '调查完成后调用 reporter_submit_report，给出简短摘要和自由文本完整报告。无需 JSON 或固定模板。',
+  ].join('\n')
 }
 
 /**
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
-interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
+interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true; reporter?: true }
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
-export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
+export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router', REPORTER_PRESET = 'dsh-superagent-reporter'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
@@ -125,7 +141,8 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET
+          : this.host.reporter?.(sessionId) ? REPORTER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -135,24 +152,30 @@ export class Sessions {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
-  /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
-  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
+  /** Resolves or creates a persistent DSH session and applies its role-specific model, prompt, tools and workspace. */
+  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker' | 'reporter'): Promise<Agent> {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
       const workspace = await ctx.workspaceRegistry.create(cwd)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
-        agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
+        agentPreset: role === 'worker' ? WORKER_PRESET : role === 'reporter' ? REPORTER_PRESET : ROUTER_PRESET })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    const model = role === 'orchestrator' ? settings.eval.model : role === 'worker' ? settings.executor.model : await this.reporterModel()
+    await initializeRoleModel(ctx, result.agent, model)
     await this.decorate(result.agent)
-    ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
+    if (role !== 'reporter') ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
+  }
+  private async reporterModel() {
+    const selected = (await this.ctx.sessionController.modelCatalog()).default
+    if (!selected.provider || !selected.model) throw new Error('Reporter DSH Session requires DSH default model')
+    return { provider: selected.provider, model: selected.model, reasoningEffort: 'xhigh' }
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {
@@ -170,12 +193,6 @@ export class Sessions {
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
   /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
   relay(requestId: string, text: string): void { this.host.effects.enqueue('relay', requestId, { text }) }
-  /** 将一份 Reporter 终态报告作为内部消息送入 Orchestrator 主会话，并在 DSH 会话持久化后返回其身份。 */
-  async deliverReport(runId: string, text: string): Promise<string> {
-    if (!runId || runId.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(runId)) throw new Error('Invalid Reporter run ID')
-    await this.prompt(this.host.masterId, `reporter-run:${runId}`, text, 'steer')
-    return this.host.masterId
-  }
   /** Enqueues a durable background notice for injection into the main Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
   notify(name: string, value: Record<string, unknown>, summary: string): void { this.host.effects.enqueue('notice', name, { value, summary }) }
   /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached the main Session or `'pending'` if it is still queued. */
@@ -241,8 +258,9 @@ export class Sessions {
     const host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { this.limitSubagent(agent); return }
-    const binding: SessionBinding = { disposers: [] }
+    const reporter = !master && !ticket ? host.reporter?.(agent.id) : undefined
+    if (!master && !ticket && !reporter) { this.limitSubagent(agent); return }
+    const binding: SessionBinding = { disposers: [], ...(reporter ? { reporter: true as const } : {}) }
     this.bindings.set(agent, binding)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
@@ -251,7 +269,8 @@ export class Sessions {
     binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-policy', order: 9999, interpolate: false, text: context => {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
-      const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
+      const composed = reporter ? reporterInstructions(reporter)
+        : host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
       return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
@@ -265,10 +284,15 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, ticket, reporter)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+    } else if (reporter) {
+      const fileTools = reporter.request.ticket_id ? ['read', 'read_image', 'glob', 'grep'] : []
+      // DSH restrictions mask inherited global tools only. Reporter tools are registered in this Agent scope and remain
+      // visible without naming them here; passing scope-local names to restrict() is rejected by DSH.
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: fileTools }))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))

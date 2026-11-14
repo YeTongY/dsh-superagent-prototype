@@ -49,7 +49,7 @@ export interface HttpHost {
   /** 仅显式测试配置挂载；capability 不进入任何管理视图。 */
   readonly reporter?: { client: LocalReporter; token: string }
   /** Persistent autonomous Reporter runs; absent when the testing-only Reporter is disabled. */
-  readonly reporterRuns?: Pick<ReporterAutonomousRuns, 'start' | 'list' | 'get' | 'cancel' | 'retryReport'>
+  readonly reporterRuns?: Pick<ReporterAutonomousRuns, 'start' | 'list' | 'get' | 'cancel'>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
@@ -282,22 +282,16 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
               json(res, 200, run); return
             }
             if (req.method === 'POST' && path.length === 3 && path[2] === 'cancel') {
-              json(res, 200, runs.cancel(path[1]!)); return
-            }
-            if (req.method === 'POST' && path.length === 3 && path[2] === 'report') {
-              json(res, 200, await runs.retryReport(path[1]!)); return
+              json(res, 200, await runs.cancel(path[1]!)); return
             }
           }
           if (req.method === 'POST' && path.length === 3 && path[0] === 'scenarios') {
             const id = path[1]!
             if (path[2] === 'complete') { json(res, 200, reporter.client.completeScenario(id)); return }
-            if (path[2] === 'review') { json(res, 200, reporter.client.recordReview(id, await readBody(req))); return }
-            if (path[2] === 'usage') { reporter.client.recordUsage(id, await readBody(req)); json(res, 200, { recorded: true }); return }
           }
           if (req.method === 'GET' && path[0] === 'scenarios' && (path.length === 2 || path.length === 3)) {
             const result = path.length === 2 ? reporter.client.scenario(path[1]!) : path[2] === 'trace' ? reporter.client.exportScenario(path[1]!)
-              : path[2] === 'replay' ? reporter.client.replayScenario(path[1]!) : path[2] === 'simulator' ? reporter.client.simulatorScenario(path[1]!)
-                : path[2] === 'review-input' ? reporter.client.reviewEvidence(path[1]!) : undefined
+              : path[2] === 'replay' ? reporter.client.replayScenario(path[1]!) : path[2] === 'simulator' ? reporter.client.simulatorScenario(path[1]!) : undefined
             if (!result) throw new RouteError(404, 'Scenario not found')
             json(res, 200, result); return
           }

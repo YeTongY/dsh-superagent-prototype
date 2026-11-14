@@ -10,7 +10,7 @@
 
 - [**tau2-bench**](https://github.com/sierra-research/tau2-bench)：借鉴场景、Persona、类型化用户动作与确定性状态评估分离的做法。它面向通用对话环境；本项目的动作直接适配 Superagent 的 Trigger、ProjectSource 和 Ticket。
 - [**Inspect AI**](https://github.com/UKGovernmentBEIS/inspect_ai)：借鉴每个样本有稳定身份、轨迹和评分边界的做法。本项目使用自己的 JSONL 记录和现有 Runtime，不引入另一套评估框架。
-- [**OpenART**](https://github.com/AI45Lab/OpenART)：借鉴隐藏 Oracle、checkpoint 和禁止副作用断言。目标 Superagent 与用户模拟器看不到 Oracle；定性 Reviewer 也不能覆盖 Oracle 结论。
+- [**OpenART**](https://github.com/AI45Lab/OpenART)：借鉴隐藏 Oracle、checkpoint 和禁止副作用断言。固定场景与目标 Superagent 看不到 Oracle；Oracle 由本地结构化证据独立计算。
 - [**GitLab QA**](https://github.com/gitlab-org/gitlab-qa)：借鉴真实平台测试保持少量、可调试、可复现的做法。Reporter 的本地结果不冒充平台通过。
 
 这里复用的是边界和验证原则，不复制这些项目的代码或目录结构。真实 GitLab 访问继续由宿主安装的 `glab` 和宿主 VPN 提供；本地 Reporter 不接触平台 Token，也不管理 VPN。
@@ -28,11 +28,11 @@ Token 由宿主注入，不写入设置、数据库、Prompt、事件或日志�
 
 本地 Sink 只截获 Reporter 场景的 Outbox 消息，不限制 Worker 的 shell、Git 或其他工具。运行模型驱动的完整测试时，仍需为被测实例准备一次性仓库、独立状态目录和受限测试凭据，避免工作任务写入正式项目；项目绑定属于应用层隔离，不是操作系统沙箱。
 
-轨迹以权限 `0600` 的 JSONL 文件保存在 `<stateDir>/reporter/`，每个场景独立一个文件。轨迹可能包含模拟用户的文字、Agent 回复、场景标识和结构化运行状态；应像测试日志一样限制访问和保留时间，不要把包含真实代码或内部讨论的轨迹公开上传。
+固定场景轨迹以权限 `0600` 的 JSONL 文件保存在 `<stateDir>/reporter/`，每个场景独立一个文件。轨迹可能包含模拟用户的文字、Superagent 回复、场景标识和结构化运行状态；自主 Reporter 的 DSH 会话历史单独由 DSH 保存，不复制进该 JSONL。应像测试日志一样限制访问和保留时间，不要把包含真实代码或内部讨论的轨迹公开上传。
 
 ## 场景定义
 
-一个场景绑定一个已启用的 ProjectSource、一个目标 Thread 和一个或多个 Actor。场景必须包含至少一个确定性 Oracle 断言。Simulator 只能取得 `visible`、Actor 名单和场景基本信息；`oracle` 只进入本地结果和导出的轨迹。
+固定回归场景绑定一个已启用的 ProjectSource、一个目标 Thread 和一个或多个 Actor。场景必须包含至少一个确定性 Oracle 断言。固定脚本/API 的 Actor 输入只取得 `visible`、Actor 名单和场景基本信息；`oracle` 只进入本地结果和导出的轨迹。此输入协议不表示自主 Reporter 另有一个模型驱动的用户模拟器。
 
 ```json
 {
@@ -98,11 +98,8 @@ curl --fail-with-body \
 | `POST /scenarios` | 注册场景，响应只包含 Simulator 安全投影，不含 Oracle |
 | `GET /scenarios/:id/simulator` | 读取 Simulator 可见的场景和 Persona |
 | `POST /events` | 提交一个带类型的 Actor 动作，响应只确认 Trigger 已经过正常接收入口 |
-| `GET /scenarios/:id` | 获取结果、确定性 Oracle、用量记录和完整本地证据；只给协调器或报告查看方使用 |
-| `GET /scenarios/:id/review-input` | 获取不含 Oracle 的 Reviewer 证据；不要用完整场景结果构造 Reviewer 输入 |
+| `GET /scenarios/:id` | 获取固定场景结果、确定性 Oracle 和本地证据；只给测试管理方使用 |
 | `POST /scenarios/:id/complete` | 标记场景终止，计算最终确定性结果 |
-| `POST /scenarios/:id/review` | 记录定性 Reviewer 总结；不能更改 Oracle 断言或通过状态 |
-| `POST /scenarios/:id/usage` | 记录一个角色的模型、Token、成本、时延和重试数据 |
 | `GET /scenarios/:id/trace` | 导出带摘要的完整 JSONL 轨迹 |
 | `GET /scenarios/:id/replay` | 不调用模型，根据已存轨迹重建 Reporter 读模型和 checkpoint 列表 |
 
@@ -130,53 +127,22 @@ curl --fail-with-body \
 
 Reporter 生成的 Trigger 使用目标 ProjectSource 作为 source 和 Actor source，走该项目的策略和权限；Channel 单独使用 `local-reporter`，由 Outbox 本地捕获并标记送达。此 Channel 不会转发给 Provider。模拟动作不会伪造 GitLab API 回复、真实 Approval/Pipeline 对象或外部平台状态。
 
-## 脚本模拟器与真实行为模拟
+## 脚本回归与原生 DSH Reporter
 
-多数回归场景应使用确定性脚本：按顺序提交用户请求、Bot 评论、Review、CI 变化、追问、重复事件和停止请求。脚本可推进模拟时间并声明某个乱序或越权动作预期被拒绝；动作语句仍由现有策略判定。`runReporterScript()` 不调用模型，Simulator 成本记录为 0，`model_calls` 为 0。
-
-当需要更自然的对话时，可由一个外部低成本模型实现 User Simulator：它只读取 `/simulator` 和目标可见的 Reporter 输出/状态，根据 Persona 逐步产生 `action`，并通过 `/events` 提交。协调器应每步等待或观察目标可见结果，再决定下一步；不要预先把完整隐藏 Oracle 或之后的测试事件注入 Simulator。高成本模拟和审查只对高风险场景开启。
-
-代码协调器只在调用者显式注入模型函数后才会请求模型。每次调用前都会检查剩余预算；费用或 Token 用量未知时，不会继续提交新的模拟动作。模型调用超时或抛错仍记为一次调用，成本和 Token 记为未知，实测时延单独保留，不会按零计算。预算字段必须是有限、非负且范围合理的数值：`max_calls` 为 0–200，`max_cost_usd` 为 0–1,000,000，`max_total_tokens` 为 0–10,000,000，`timeout_ms` 为 1–86,400,000；Simulator 的 `maxTurns` 为 1–200。预算耗尽后不会再发起模型调用。
-
-公开入口为 `dsh-superagent/reporter`。在持有测试 Runtime 的协调进程中，可以复用其 `reporter`，注入选定模型和等待目标回复的函数：
-
-```ts
-import { runUserSimulator, runQualitativeReviewer } from 'dsh-superagent/reporter'
-
-const simulation = await runUserSimulator({
-  reporter, scenarioId: 'pull-request-follow-up',
-  invoke: callLowCostModel,
-  waitForSuperagent: waitUntilTargetResponds,
-  maxTurns: 8,
-  budget: { max_calls: 10, max_cost_usd: 0.1, max_total_tokens: 12000, timeout_ms: 120000 },
-})
-// 按场景风险或采样策略显式决定是否审查。
-const review = await runQualitativeReviewer({
-  reporter, scenarioId: simulation.scenario_id,
-  invoke: callReviewerModel,
-  budget: { max_calls: 1, max_cost_usd: 0.05, max_total_tokens: 4000 },
-})
-```
-
-示例中的模型函数和等待函数由调用方实现。模型函数接收安全投影、`instructions`、`signal` 和 `remaining_budget`，返回 `{ output, usage }`；`usage` 可包含 `model`、`prompt_tokens`、`completion_tokens`、`cost_usd`、`latency_ms` 和 `retries`。等待函数应在可见回复到达或目标本轮处理结束后返回，并遵守中止信号；只等待 Trigger 入库不能说明 Agent 已完成响应。
-
-协调器能阻止后续调用，无法撤销模型服务已经计费的请求。调用方仍需把剩余 Token/费用限制传给模型服务，并正确取消进行中的请求；单次超支或中止后的服务端费用必须如实计量。没有注入模型函数时，不会因启用 Reporter 自动产生额外模型调用。
-
-目标 Superagent 的模型调用成本默认无法按场景自动归属，因为主 Session 可能同时处理多个场景和其他工作。只有外部 Runner 确实掌握对应 Token、时延、成本和重试时，才调用 `/usage` 记录 `role: "superagent"`。没有提供的成本保持未知，不能当作 0。脚本 Simulator 的零成本只表示它没有调用模型。
+固定回归优先使用 `runReporterScript()`：它不调用模型，按明确的用户事件顺序验证策略、幂等、路由、Oracle 和本地回复。自主探索由独立的原生 DSH Reporter Session 承担，不再由外部协调器、嵌套 Simulator 或 Reviewer 驱动。
 
 ## 自主测试运行
 
-固定脚本用于稳定回归；自主报告者接收的是产品级目标、ProjectSource、允许的测试通道和有限预算。它自行观察运行状态、选择实验、根据真实反馈调整测试，最后保存发现与复现证据。调用方不需要先为它编写完整场景。
+固定脚本用于稳定回归；自主报告者接收产品级目标、ProjectSource 和明确授权的测试通道，在独立 DSH Session 中自行观察、选择动作、根据真实反馈继续调查并形成报告。调用方不预先指定测试步骤或缺陷。
 
 运行接口位于 `/orchestrator/reporter/runs`，仍要求上文的 loopback、同源请求头及 capability 认证：
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `POST /runs` | 以幂等键提交测试目标、项目、权限和预算，异步返回运行状态 |
+| `POST /runs` | 以幂等键提交测试目标、项目及权限，异步启动原生 Reporter Session |
 | `GET /runs` | 查看有界的运行列表 |
-| `GET /runs/:id` | 查看阶段、实际调用数及结果 |
-| `POST /runs/:id/cancel` | 中止后续测试动作和模型请求 |
-| `POST /runs/:id/report` | 重投已存档的终态报告，不重新执行测试或调用 Reporter 模型 |
+| `GET /runs/:id` | 查看 Reporter Session 状态和已提交报告 |
+| `POST /runs/:id/cancel` | 使用 DSH Agent 原生取消当前 Reporter Session |
 | `GET /orchestrator/api/reporter` | 管理页的只读状态投影，不含 capability、认证或隐藏 Oracle |
 
 例如下面的启动输入只描述测试目标，不指定测试场景和操作顺序；将项目 ID 换成实际已启用的来源：
@@ -187,52 +153,41 @@ const review = await runQualitativeReviewer({
   "project_source_id": "github-0123456789abcdef01234567",
   "goal": "从首次使用的维护者视角，自主探索需求处理与后续沟通是否清楚、正确；根据实际反馈选择测试，保留疑点的复现证据。",
   "mode": "simulation",
-  "permissions": { "simulation": true },
-  "budget": {
-    "max_model_calls": 12,
-    "max_actions": 4,
-    "max_experiments": 1,
-    "max_total_tokens": 100000,
-    "timeout_ms": 600000
-  }
+  "permissions": { "simulation": true }
 }
 ```
 
-`mode` 可选 `simulation`、`real-service`、`browser` 或 `both`（仿真与接口）。接口测试需 `read_only_service: true`；浏览器测试需同时声明 `browser: true` 和 `read_only_service: true`。未声明的权限默认关闭。预算限制的是 Reporter 后续调用；被测 Superagent 的模型消耗单独记录，不能把 Reporter 的 Token 上限冒充整个系统的总费用上限。`max_total_tokens` 是累计已报告用量的停止阈值，本次输出另按剩余额度限制；单次输入用量在模型返回前无法精确计量，可能跨过阈值。越过时保留实际 Token，运行标为未完成并停止后续调用，不把已知用量改成未知。
+`mode` 可选 `simulation`、`real-service`、`browser` 或 `both`（仿真与只读接口）。每种能力还必须在 `permissions` 中显式开启，未声明的权限默认关闭。Reporter 使用 DSH 当前默认模型与 DSH 原生会话生命周期，reasoning effort 为 `xhigh`；产品不另建模型循环、调用/Token/实验预算、无进展提醒或运行截止时间。显式取消、Runtime 关闭以及 DSH/模型/工具真实错误仍按各自生命周期结束。
 
-仿真通道通过独立用户模拟上下文产生动作，动作仍进入真实 Runtime/Engine；每轮等待目标实际处理后，才将公开回复用于下一轮。只读服务通道访问当前实例的实际管理 HTTP 接口。浏览器通道使用可选的 Playwright Chromium，在独立上下文中观察真实页面并执行有限动作；没有安装浏览器或无法登录时明确报告不可用，不用接口结果代替页面操作证据。
+仿真动作经现有 LocalReporter、Runtime 和 Engine；每条动作都等待真实 Superagent 目标响应，不能伪造回复。只读服务能力访问固定枚举管理接口。浏览器能力使用受限 Playwright Chromium 观察和操作本地管理页面；不能用接口探测代替页面操作。
 
-探索者、Simulator 和 Reviewer 的模型请求均显式使用 `medium`，目标 Superagent 的模型配置独立。模型路由与认证复用 DSH 原生服务，不增加另一套 Responses 客户端。启动前校验模型是否支持 medium；运行中显示实际选择的模型及调用次数。费用未知保持未知，缓存读取计入输入 Token；不能由测试调用数直接推导节省了多少成本。
+每次 Reporter 运行有一个真实、可恢复、可从 DSH 会话目录打开的 Session。superagent 页面只保留会话 ID、状态和报告投影；Session 历史、工具轮次、Inbox、用量与渲染由 DSH 持有。
 
-一次实例只运行一个自主测试。重复幂等请求返回原运行；取消、运行时关闭或预算耗尽后不再发起后续动作。重启不自动恢复付费任务。管理页将“已启用但未运行”与“正在测试”分开，并展示实验、用户动作、模型调用、摘要和发现。发现分为候选、已确认、测试本身无效；只有可验证证据支持的结果才能作为确认缺陷，模型怀疑不能直接升级为事实。
+运行可选绑定 `ticket_id` 以检查执行者实现。服务端校验 Ticket 与 ProjectSource 后，把 Reporter Workspace 指向该工单的 `execution.directory`；工单完成后，只要目录仍存在，仍可只读复核。未绑定工单时不开放文件读取/搜索工具。Reporter 永远不能写文件、执行 shell、改变 Ticket 或直接派工。
 
-`budget.timeout_ms` 表示连续无真实进展后的提醒窗口，不再表示运行截止时间。Reporter 模型产生非空内容或推理增量、完成模型调用或实际操作，以及当前场景相关目标会话与领域状态发生有效变化时，重新计算无进展时间。定时轮询、一直显示“忙”、空流帧和单纯重试不算进展；即使模型内部仍在推理但暂时没有输出，超过提醒窗口也只显示停滞提示，保留运行并继续等待。后续出现真实进展时清除提示。用户可以手动取消；用户取消和运行时关闭仍立即生效，模型调用数、动作数、实验数和 Token 预算继续限制新增测试工作。模型或目标实际报错、预算耗尽仍按各自原因结束。若底层模型调用永久不返回，单实例运行槽会一直保留，需由用户根据管理页提示判断是否取消；项目不依据单个时钟阈值猜测模型已经卡死。
+Reporter 发现候选或需要澄清时调用 `reporter_candidate`，本地 relay 即时把观察送入 Orchestrator 主 Session。Orchestrator 可调用 `orchestrator_reporter_reply` 把追问送入同一个 Reporter Session，Reporter 读取回复并继续调查。候选不等同于修复授权；是否值得修复、是否派给执行者仍由 Orchestrator 判断。
 
-管理页按运行卡片展示模式、状态、中文失败原因和关键计数，完整目标、模型、费用细项、实验过程及证据放在可展开的运行详情中。格式校验失败仅保留有界字段路径和错误码，不显示完整模型输出或认证数据。模拟器的字段约束由实际 Zod schema 生成，仍由模拟器自主选择动作内容。
+完成后 Reporter 调用 `reporter_submit_report`，提交一段摘要和自由文本完整报告；不要求 JSON 或固定模板。报告同时显示在 Superagent 管理页并经本地 relay 交给 Orchestrator。页面使用已有 `MarkdownLite` 和 `SessionButton`；完整对话历史只由 DSH Session 保存与原生呈现，不复制一份 transcript 或 renderer。
 
-测试结束后，Reporter 先持久化终态与报告，再直接通过本地 DSH Agent/Session 入口把报告送到 Orchestrator 主会话。报告包含公开仿真对话、浏览器逐步操作、观察、候选发现和证据定位；隐藏 Oracle 规则和原始页面快照不进入主会话。报告按纯文本标题、编号和换行组织，不依赖用户消息的 Markdown 渲染。管理页在报告确认送达且具有真实主会话 ID 后显示“在 DSH 中查看报告”，复用现有会话导航，交由 DSH 原生 Chat/Trajectory 展示。
-
-`report_delivery.status` 为 `pending`、`delivered` 或 `failed`。`delivered` 只表示报告已进入并持久化到主会话，不代表模型已经阅读或处理。首次交付的报告固定存档；重试复用同一运行 ID 和正文，接收端按稳定消息 ID 去重。重启仅恢复待交付报告，不恢复付费测试；失败或旧版未交付报告可通过受保护的重投接口补交。此路径不创建新的平台事件、工单或测试动作，不发送 GitHub/GitLab 消息。
+启用 Reporter 不会自动启动测试或产生模型调用。DSH Runtime 重启时，Reporter 复用同一 Session ID 和既有会话历史；长时间无输出不会产生 Reporter 专用提醒或自动停止。管理页状态来自 DSH Agent 与 Reporter 已提交的报告投影。
 
 浏览器登录由运行时通过 DSH 官方 Connection 服务取得临时登录地址，驱动在浏览器内部交换 Cookie；认证地址、Cookie、Reporter capability 和模型密钥不进入模型或轨迹。页面驱动限制到同一 loopback 服务，禁止外站与文件传输。该约束不替代 Worker 的操作系统隔离，仿真导致的 Worker 行为仍遵守前文的独立测试环境边界。
 
-## Oracle、Reviewer 与结果含义
+## Oracle 与结果含义
 
-Oracle 断言包括接收结果、Decision 类型、Ticket 数量和终态、Worker report 状态、本地输出数量及禁止 Ticket/输出。它根据结构化 Store 快照和本地 Sink 输出计算；Reviewer 文本不会成为这些断言的输入，也不能覆盖失败。Reporter 无法读取 Runtime 快照时会明确报告 `snapshot_available: false`，依赖快照的断言失败。
+Oracle 断言包括接收结果、Decision 类型、Ticket 数量和终态、Worker report 状态、本地输出数量及禁止 Ticket/输出。它根据结构化 Store 快照和本地 Sink 输出计算，不进入 Reporter Session，也不由 Reporter 改写。Reporter 的候选只代表待 Orchestrator 评估的观察；要确认产品状态仍需检查对应确定性证据。
 
-终态结果分成：
+固定场景的本地终态结果分成：
 
 - `behavioral_pass`：场景要求的策略、Decision、Ticket 和行为断言。
 - `delivery_pass`：场景要求的本地回复/输出是否出现以及次数是否正确；场景没有交付断言时为 `null`。
 - `platform_pass`：本地 Reporter 固定返回 `null`，因为它没有验证真实 GitHub/GitLab 网络、字段或消息交付。
 
-Reviewer 使用 `/review-input` 返回的可见对话、输出和结构化状态，生成简短总结、带证据的发现与异常解释。Reviewer 请求不包含隐藏 Oracle；其输出只作为定性报告附加保存。最终报告应同时保留确定性结果、Reviewer 总结及各角色独立的成本和时延数据。
-
 `/replay` 是对不可变 Reporter JSONL 记录的确定性重建，不会重新提交 Trigger，也不会重新运行目标 Superagent 或再次调用 LLM。已注册场景的定义和版本不可原地修改；若要复跑被测 Agent，应使用新的场景 ID，并在独立状态库中运行，避免将两次结果混成一条轨迹。
 
 ## 测试层级
 
-1. **本地行为覆盖**：Reporter 事件经过 Engine；验证策略、项目身份、重复/乱序、checkpoint、Oracle、Reviewer 边界和本地输出 Sink。
+1. **本地行为覆盖**：固定场景事件经过 Engine；验证策略、项目身份、重复/乱序、checkpoint、Oracle 和本地输出 Sink。自主 Reporter 以独立 DSH Session 运作，不另建模型协调器或对话存储。
 2. **Fake GitLab 覆盖**：通过 fake `glab` 或 fake 服务验证 CLI/JSON/分页/错误处理；不需要 VPN。
 3. **真实宿主 VPN 覆盖**：使用一次性内网 GitLab 项目和独立 Reporter 账号，验证认证、Issue/MR 评论交付及少量 MR/Pipeline 生命周期；VPN 路由由宿主提供。
 
@@ -254,4 +209,4 @@ pnpm exec vitest run tests/gitlab-vpn-e2e.spec.ts
 
 测试会创建临时 Issue、带测试文件的分支和 Draft MR，分别发送并重试 Issue/MR 评论，检查每条评论只有一份，再验证 MR 从打开到关闭。最后关闭本测试创建的 Issue/MR 并删除测试分支，评论和关闭记录仍保留在一次性项目中；分支提交也可能触发项目已有的 CI。清理失败会让测试失败并提示检查测试资源。
 
-该测试检查真实 Provider 认证与交付，不调用 Simulator、Reviewer 或被测 Superagent 模型。Pipeline 读取会核对当前 head SHA；无 Pipeline 时不能宣称 CI 通过。它也不执行真实 `git push`，不能代替宿主 Git 凭据与分支保护的专项验证。未显式设置门控变量时，测试结果为跳过，平台与 VPN 均未验证。
+该测试检查真实 Provider 认证与交付，不调用自主 Reporter 或被测 Superagent 模型。Pipeline 读取会核对当前 head SHA；无 Pipeline 时不能宣称 CI 通过。它也不执行真实 `git push`，不能代替宿主 Git 凭据与分支保护的专项验证。未显式设置门控变量时，测试结果为跳过，平台与 VPN 均未验证。

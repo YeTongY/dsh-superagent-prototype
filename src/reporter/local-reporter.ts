@@ -11,12 +11,12 @@ import { ReporterEnvelopeSchema, ReporterScenarioSchema, reporterEnvelopeDigest,
 
 export const REPORTER_ERROR_CODES = ['disabled', 'invalid_request', 'scenario_not_found', 'scenario_conflict', 'version_mismatch', 'project_mismatch',
   'thread_mismatch', 'actor_not_allowed', 'idempotency_conflict', 'sequence_conflict', 'sequence_out_of_order', 'receive_failed', 'trace_corrupt',
-  'output_not_local', 'review_invalid', 'limit_exceeded'] as const
+  'output_not_local', 'limit_exceeded'] as const
 export type ReporterErrorCode = typeof REPORTER_ERROR_CODES[number]
 
 const ERROR_STATUS: Record<ReporterErrorCode, number> = { disabled: 404, invalid_request: 400, scenario_not_found: 404, scenario_conflict: 409,
   version_mismatch: 409, project_mismatch: 400, thread_mismatch: 400, actor_not_allowed: 400, idempotency_conflict: 409,
-  sequence_conflict: 409, sequence_out_of_order: 409, receive_failed: 500, trace_corrupt: 500, output_not_local: 400, review_invalid: 400, limit_exceeded: 413 }
+  sequence_conflict: 409, sequence_out_of_order: 409, receive_failed: 500, trace_corrupt: 500, output_not_local: 400, limit_exceeded: 413 }
 
 /** Reporter 接口的结构化错误，供本地 API 映射稳定错误码和 HTTP 状态。 */
 export class ReporterError extends Error {
@@ -37,7 +37,7 @@ export interface ReporterCheckpoint {
   created_at: string
 }
 
-export interface ReporterUsage {
+interface LegacyReporterUsage {
   role: 'autonomous-explorer' | 'user-simulator' | 'browser-tester' | 'superagent' | 'qualitative-reviewer'
   model?: string
   prompt_tokens?: number
@@ -47,7 +47,7 @@ export interface ReporterUsage {
   retries?: number
 }
 
-export interface ReporterReview {
+interface LegacyReporterReview {
   summary: string
   findings: { severity: 'info' | 'warning' | 'error'; text: string; evidence?: string[] }[]
   model?: string
@@ -66,14 +66,6 @@ export interface ReporterOracleResult {
 }
 export interface ReporterTrace { format: 'dsh-superagent-reporter/v1'; scenario_id: string; records: ReporterJournalRecord[]; sha256: string }
 export interface ReporterReplay { scenario_id: string; last_sequence: number; trigger_ids: string[]; outputs: ReporterOutput[]; domain_events: DomainEvent[]; checkpoints: ReporterCheckpoint[]; completed: boolean; replayed_without_model_calls: true }
-export interface ReporterReviewEvidence {
-  simulator: ReporterSimulatorScenario
-  inputs: { sequence: number; actor_id: string; action: ReporterAction; text: string; simulated_at: string }[]
-  outputs: ReporterOutput[]
-  domain_events: DomainEvent[]
-  runtime: ReporterRuntimeSnapshot | null
-  snapshot_available: boolean
-}
 export interface ReporterSimulatorFeedback {
   scenario: ReporterSimulatorScenario
   last_sequence: number
@@ -96,8 +88,6 @@ export interface ReporterScenarioResult {
   runtime: ReporterRuntimeSnapshot | null
   snapshot_available: boolean
   oracle: ReporterOracleResult
-  review?: ReporterReview
-  usage: ReporterUsage[]
 }
 
 export type ReporterJournalRecord =
@@ -109,8 +99,8 @@ export type ReporterJournalRecord =
   | { type: 'domain.observed'; event: DomainEvent }
   | { type: 'checkpoint.created'; checkpoint: ReporterCheckpoint }
   | { type: 'scenario.completed'; at: string }
-  | { type: 'review.recorded'; review: ReporterReview }
-  | { type: 'usage.recorded'; usage: ReporterUsage; at: string }
+  | { type: 'review.recorded'; review: LegacyReporterReview }
+  | { type: 'usage.recorded'; usage: LegacyReporterUsage; at: string }
 
 export interface LocalReporterOptions {
   stateDir: string
@@ -132,12 +122,11 @@ interface ReporterState {
   outputs: ReporterOutput[]
   domainEvents: DomainEvent[]
   checkpoints: ReporterCheckpoint[]
-  review?: ReporterReview
-  usage: ReporterUsage[]
   completed: boolean
 }
 
 const emptySnapshot = (): ReporterRuntimeSnapshot => ({ triggers: [], decisions: [], tickets: [] })
+const LegacyScenarioSchema = ReporterScenarioSchema.extend({ timeout_ms: z.number().int().positive().max(3_600_000).optional() }).strict()
 export const REPORTER_LIMITS = { scenarios: 100, eventsPerScenario: 10_000, outputsPerScenario: 2_000, domainEventsPerScenario: 8_000,
   checkpointsPerScenario: 2_000, scenarioBytes: 64 * 1024, traceBytes: 16 * 1024 * 1024, totalBytes: 128 * 1024 * 1024,
   inputTextChars: 20_000, outputTextChars: 20_000 } as const
@@ -147,10 +136,10 @@ const nowIso = (): string => new Date().toISOString()
 const validString = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 const jsonObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
-const UsageSchema = z.object({ role: z.enum(['autonomous-explorer', 'user-simulator', 'browser-tester', 'superagent', 'qualitative-reviewer']), model: z.string().max(200).optional(),
+const LegacyUsageSchema = z.object({ role: z.enum(['autonomous-explorer', 'user-simulator', 'browser-tester', 'superagent', 'qualitative-reviewer']), model: z.string().max(200).optional(),
   prompt_tokens: z.number().int().nonnegative().optional(), completion_tokens: z.number().int().nonnegative().optional(),
   cost_usd: z.number().nonnegative().optional(), latency_ms: z.number().nonnegative().optional(), retries: z.number().int().nonnegative().optional() }).strict()
-const ReviewSchema = z.object({ summary: z.string().min(1).max(8_000), findings: z.array(z.object({ severity: z.enum(['info', 'warning', 'error']),
+const LegacyReviewSchema = z.object({ summary: z.string().min(1).max(8_000), findings: z.array(z.object({ severity: z.enum(['info', 'warning', 'error']),
   text: z.string().min(1).max(4_000), evidence: z.array(z.string().max(300)).max(20).optional() }).strict()).max(100), model: z.string().max(200).optional(),
   cost_usd: z.number().nonnegative().optional(), latency_ms: z.number().nonnegative().optional(), retries: z.number().int().nonnegative().optional() }).strict()
 
@@ -163,10 +152,7 @@ export interface LocalReporter {
   capture(message: OutboundMessage): boolean
   observe(event: DomainEvent): void
   completeScenario(id: string): ReporterScenarioResult
-  recordUsage(id: string, usage: unknown): void
-  recordReview(id: string, review: unknown): ReporterScenarioResult
   scenario(id: string): ReporterScenarioResult | undefined
-  reviewEvidence(id: string): ReporterReviewEvidence | undefined
   exportScenario(id: string): ReporterTrace | undefined
   replayScenario(id: string): ReporterReplay | undefined
 }
@@ -225,16 +211,6 @@ class Reporter implements LocalReporter {
     ].sort((left, right) => left.simulated_at.localeCompare(right.simulated_at))
       .slice(-100).map(item => ({ ...item, text: item.text.slice(-4_000) }))
     return { scenario: simulatorView(state.definition), last_sequence: state.inputs.at(-1)?.envelope.sequence ?? 0, conversation }
-  }
-
-  reviewEvidence(id: string): ReporterReviewEvidence | undefined {
-    const state = this.state(id)
-    if (!state?.definition) return undefined
-    let runtime: ReporterRuntimeSnapshot | null = null
-    try { runtime = clone(this.options.snapshot(id, state.inputs.map(item => item.trigger.id))) } catch { /* 证据不全时明示，不以空状态误导 Reviewer。 */ }
-    return { simulator: simulatorView(state.definition), inputs: state.inputs.map(item => ({ sequence: item.envelope.sequence,
-      actor_id: item.envelope.actor_id, action: clone(item.envelope.action), text: item.trigger.text, simulated_at: item.envelope.simulated_at })),
-      outputs: clone(state.outputs), domain_events: clone(state.domainEvents), runtime, snapshot_available: runtime !== null }
   }
 
   submit(input: unknown): ReporterAck {
@@ -335,36 +311,6 @@ class Reporter implements LocalReporter {
       this.append(id, record)
       this.apply(id, record)
       this.checkpoint(id, 'domain-event')
-    }
-    return this.result(id, state)
-  }
-
-  recordUsage(id: string, input: unknown): void {
-    this.requireEnabled()
-    this.requireScenario(id)
-    const parsed = UsageSchema.safeParse(input)
-    if (!parsed.success) throw new ReporterError('invalid_request', '模型成本与时延记录格式无效')
-    const record: ReporterJournalRecord = { type: 'usage.recorded', usage: parsed.data, at: this.now() }
-    this.append(id, record)
-    this.apply(id, record)
-  }
-
-  recordReview(id: string, input: unknown): ReporterScenarioResult {
-    this.requireEnabled()
-    const state = this.requireScenario(id)
-    const parsed = ReviewSchema.safeParse(input)
-    if (!parsed.success) throw new ReporterError('review_invalid', '定性 Reviewer 结果格式无效')
-    const review = clone(parsed.data)
-    const record: ReporterJournalRecord = { type: 'review.recorded', review }
-    this.append(id, record)
-    this.apply(id, record)
-    if (review.model || review.cost_usd !== undefined || review.latency_ms !== undefined || review.retries !== undefined) {
-      const usage: ReporterUsage = { role: 'qualitative-reviewer', ...(review.model ? { model: review.model } : {}),
-        ...(review.cost_usd !== undefined ? { cost_usd: review.cost_usd } : {}), ...(review.latency_ms !== undefined ? { latency_ms: review.latency_ms } : {}),
-        ...(review.retries !== undefined ? { retries: review.retries } : {}) }
-      const usageRecord: ReporterJournalRecord = { type: 'usage.recorded', usage, at: this.now() }
-      this.append(id, usageRecord)
-      this.apply(id, usageRecord)
     }
     return this.result(id, state)
   }
@@ -525,11 +471,11 @@ class Reporter implements LocalReporter {
       coverage: { behavior: 'local-engine', platform: 'not-run', delivery: 'local-sink' }, simulator: simulatorView(definition),
       inputs: clone(state.inputs.map(item => ({ envelope: item.envelope, trigger: item.trigger, ack: item.ack, recorded_at: item.at }))),
       outputs: clone(state.outputs), domain_events: clone(state.domainEvents), checkpoints: clone(state.checkpoints), runtime, snapshot_available: runtime !== null,
-      oracle, ...(state.review ? { review: clone(state.review) } : {}), usage: clone(state.usage) }
+      oracle }
   }
 }
 
-function newState(): ReporterState { return { records: [], inputs: [], pending: [], outputs: [], domainEvents: [], checkpoints: [], usage: [], completed: false } }
+function newState(): ReporterState { return { records: [], inputs: [], pending: [], outputs: [], domainEvents: [], checkpoints: [], completed: false } }
 function applyRecord(state: ReporterState, record: ReporterJournalRecord): void {
   state.records.push(clone(record))
   switch (record.type) {
@@ -547,8 +493,8 @@ function applyRecord(state: ReporterState, record: ReporterJournalRecord): void 
     case 'domain.observed': state.domainEvents.push(clone(record.event)); break
     case 'checkpoint.created': state.checkpoints.push(clone(record.checkpoint)); break
     case 'scenario.completed': state.completed = true; break
-    case 'review.recorded': state.review = clone(record.review); break
-    case 'usage.recorded': state.usage.push(clone(record.usage)); break
+    case 'review.recorded':
+    case 'usage.recorded': break
   }
 }
 
@@ -556,7 +502,8 @@ function parseRecord(value: unknown): ReporterJournalRecord {
   if (!jsonObject(value) || typeof value.type !== 'string') throw new Error('invalid journal record')
   switch (value.type) {
     case 'scenario.registered': {
-      const definition = ReporterScenarioSchema.parse(value.definition)
+      const parsed = ReporterScenarioSchema.safeParse(value.definition)
+      const definition = parsed.success ? parsed.data : LegacyScenarioSchema.parse(value.definition)
       if (!validString(value.at)) throw new Error('invalid timestamp')
       return { type: value.type, definition, at: value.at }
     }
@@ -591,11 +538,11 @@ function parseRecord(value: unknown): ReporterJournalRecord {
     }
     case 'scenario.completed': if (!validString(value.at)) throw new Error('invalid completion'); return { type: value.type, at: value.at }
     case 'review.recorded': {
-      const parsed = ReviewSchema.parse(value.review)
+      const parsed = LegacyReviewSchema.parse(value.review)
       return { type: value.type, review: parsed }
     }
     case 'usage.recorded': {
-      const parsed = UsageSchema.parse(value.usage)
+      const parsed = LegacyUsageSchema.parse(value.usage)
       if (!validString(value.at)) throw new Error('invalid usage timestamp')
       return { type: value.type, usage: parsed, at: value.at }
     }
@@ -605,8 +552,7 @@ function parseRecord(value: unknown): ReporterJournalRecord {
 
 function simulatorView(definition: ReporterScenarioDefinition): ReporterSimulatorScenario {
   return clone({ id: definition.id, version: definition.version, project_source_id: definition.project_source_id, thread_id: definition.thread_id,
-    thread_kind: definition.thread_kind, ...(definition.title ? { title: definition.title } : {}), visible: definition.visible, actors: definition.actors,
-    ...(definition.timeout_ms ? { timeout_ms: definition.timeout_ms } : {}) })
+    thread_kind: definition.thread_kind, ...(definition.title ? { title: definition.title } : {}), visible: definition.visible, actors: definition.actors })
 }
 
 function evaluateOracle(definition: ReporterScenarioDefinition, inputs: InputRecord[], runtime: ReporterRuntimeSnapshot | null, outputs: ReporterOutput[]): ReporterOracleResult {

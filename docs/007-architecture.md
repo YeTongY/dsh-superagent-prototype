@@ -300,16 +300,14 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/sources/gitlab-trigger.ts` | Issue、MR、Note、审批与 Pipeline 的类型及 Trigger 规范化 |
 | `src/sources/gitlab-read.ts` | GitLab 上下文、仓库文件、审批、Discussion 和 CI 读取 |
 | `src/sources/gitlab-pull.ts` | MR 归属校验、关联、生命周期与终态通知 |
-| `src/reporter/index.ts` | 本地 Reporter、脚本和可选模型协调器的公开入口 |
+| `src/reporter/index.ts` | 本地 Reporter 与确定性脚本的公开入口 |
 | `src/reporter/protocol.ts` | 严格场景与动作协议、隐藏 Oracle 和运行时快照类型 |
 | `src/reporter/local-reporter.ts` | 输入日志、幂等恢复、本地输出、checkpoint、Oracle 和无模型回放 |
-| `src/reporter/autonomous.ts` | 有界自主测试运行、模型预算、场景选择、证据和终态持久化 |
-| `src/reporter/progress.ts` | Reporter 真实活动信号与只提醒、不终止运行的连续无进展监视器 |
+| `src/reporter/autonomous.ts` | 原生 DSH Reporter Session 的轻量运行投影与生命周期入口 |
 | `src/reporter/browser.ts` | 受限的 loopback 管理页浏览器观察与语义动作 |
-| `src/reporter/dsh-model.ts` | 复用 DSH 原生模型路由和每次调用的 `medium` 推理等级 |
-| `src/client/reporter-status.tsx` | 只读展示自主 Reporter 进度、用量、实验和发现 |
+| `src/app/tools/reporter.ts` | Reporter Session 可用的本地仿真、只读探测、候选与报告工具 |
+| `src/client/reporter-status.tsx` | 展示摘要、完整报告与原生 Reporter Session 入口 |
 | `src/reporter/script.ts` | 不调用模型的多角色场景脚本驱动器 |
-| `src/reporter/coordinator.ts` | 注入模型的 User Simulator 与 Reviewer、安全投影、预算与中止控制 |
 | `src/index.ts` | 主插件入口：读取机器设置、启动 Runtime，并为保存 Source 账号后触发 Runtime 重启提供回调。 |
 | `src/deployment.ts` | 插件的 `Config` 和 `Machine`；`resolveDeployment` 和 `resolveFeishuBot` 从 Source 设置读取仓库及账号，Executor shell 运行时会调用相应 CLI；`SETUP_FIELDS` 列出 Setup 要读取的 Source 字段。代码中不写死任何人、账号或组织名称。 |
 | `src/setup.ts` | Setup 问题：`SetupError` 包含 code 和处理位置，以及日志、主 Session 和管理面板共用的英文文本。 |
@@ -417,7 +415,7 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/client/locales.ts` | 两种语言的全部文案，以及[001 领域模型](001-domain.md)中的术语表。 |
 | `src/client/client.css`、`css.d.ts` | 管理面板样式表，并以文本方式加载。 |
 
-GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 和 `./feishu-watch` 导出，由 `tsdown.config.ts` 构建。`./reporter` 导出供本地协调器使用的脚本与可选模型接口；普通 Runtime 不会自动调用模型。bundle 通过 `cordis.patch.yml` 注册 Source 插件，具体默认开关见该文件。
+GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 和 `./feishu-watch` 导出，由 `tsdown.config.ts` 构建。`./reporter` 导出固定场景脚本和 Reporter 管理投影；自主 Reporter 的模型循环、会话历史、消息与渲染由 Runtime 中的 DSH Session 承担。bundle 通过 `cordis.patch.yml` 注册 Source 插件，具体默认开关见该文件。
 
 ## 测试
 
@@ -427,13 +425,10 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | `tests/project-context.spec.ts` | 旧身份、新项目与 Reporter Trigger 的上下文隔离和路由 |
 | `tests/project-migration.spec.ts` | 停机迁移、回滚、历史策略版本、活动授权和 Eval 恢复 |
 | `tests/reporter.spec.ts` | 本地 Reporter 协议、持久化、隐藏 Oracle、脚本与回放 |
-| `tests/reporter-coordinator.spec.ts` | 假模型驱动的多轮行为、隐藏 Oracle、严格输出、预算、取消与成本未知处理 |
-| `tests/reporter-progress.spec.ts` | 无进展提醒只更新状态、不取消运行，并在真实进展后重新计时 |
 | `tests/reporter-runtime.spec.ts` | 真实 Runtime/Engine 的本地闭环、GitHub/GitLab 同号项目和 MR 报告路由 |
-| `tests/reporter-autonomous.spec.ts` | 自主选择、多轮目标反馈、证据、预算、幂等与运行恢复 |
+| `tests/reporter-autonomous.spec.ts` | DSH Session 身份、幂等恢复、执行工作区绑定、报告投影与取消 |
 | `tests/reporter-browser.spec.ts` | loopback 浏览器登录、同源限制、语义动作和凭据隔离 |
-| `tests/reporter-dsh-model.spec.ts` | 原生 DSH 模型调用的 medium 配置、用量映射和失败分类 |
-| `tests/panel-overview.spec.tsx` | 概览与自主 Reporter 状态、证据、用量及发现展示 |
+| `tests/panel-overview.spec.tsx` | 概览与自主 Reporter 状态、摘要/完整报告及 DSH Session 导航 |
 | `tests/gitlab-vpn-e2e.spec.ts` | 显式门控的真实 glab 认证、Issue/MR 幂等评论、MR 生命周期与资源清理；默认跳过 |
 | `tests/gitlab.spec.ts` | Fake glab 的参数、分页、认证、TLS、项目隔离、讨论交付、临时故障和 CI 证据 |
 | `tests/ticket-shell.spec.ts` | 真实子进程中的并发环境绑定、转义、权限与宿主环境保持 |

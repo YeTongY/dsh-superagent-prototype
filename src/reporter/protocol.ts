@@ -89,12 +89,11 @@ export const ReporterScenarioSchema = z.object({
     z.object({ kind: z.literal('forbid-output'), output: z.enum(REPORTER_OUTPUT_KINDS) }).strict(),
     z.object({ kind: z.literal('forbid-ticket') }).strict(),
   ])).min(1).max(100) }).strict(),
-  timeout_ms: z.number().int().positive().max(3_600_000).optional(),
 }).strict()
 export type ReporterScenarioDefinition = z.infer<typeof ReporterScenarioSchema>
 
 /** Simulator 可见的场景投影；类型上不含 oracle 字段。 */
-export type ReporterSimulatorScenario = Pick<ReporterScenarioDefinition, 'id' | 'version' | 'project_source_id' | 'thread_id' | 'thread_kind' | 'title' | 'visible' | 'actors' | 'timeout_ms'>
+export type ReporterSimulatorScenario = Pick<ReporterScenarioDefinition, 'id' | 'version' | 'project_source_id' | 'thread_id' | 'thread_kind' | 'title' | 'visible' | 'actors'>
 export interface ReporterProjectIdentity { id: string; provider: ProjectProvider; host: string; project: string }
 export interface ReporterAck {
   scenario_id: string

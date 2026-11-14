@@ -164,17 +164,26 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** Each Session's next step, which takes the messages that wait for one. */
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
+  const restrictions = new Map<string, { allow: string[] }[]>()
+  // DSH restrictions apply to inherited global tools only; scoped tools remain visible and cannot be named in a mask.
+  const globalToolNames = new Set(['read', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'])
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const controller = {
+    modelCatalog: vi.fn(async () => ({ default: { provider: 'deepseek', model: 'deepseek-chat' } })),
     create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       const register = (tool: RegisteredTool) => { sessionTools.set(tool.name, tool); return () => sessionTools.delete(tool.name) }
-      agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) })
+      agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn((filter: { allow: string[] }) => {
+        const unknown = filter.allow.filter(name => !globalToolNames.has(name))
+        if (unknown.length) throw new Error(`Restriction names scope-local or unknown tools: ${unknown.join(', ')}`)
+        restrictions.set(sessionId, [...restrictions.get(sessionId) ?? [], filter])
+        return () => {}
+      }), guard: vi.fn(() => () => {}) })
       agentCtx.reflect.provide('skills', { register: () => () => {} })
       agentCtx.reflect.provide('systemPrompt', { section: () => () => {} })
       const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[],
@@ -293,7 +302,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { runtime, ctx, directory, agents, tools, restrictions, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
     jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

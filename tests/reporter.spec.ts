@@ -89,13 +89,10 @@ it('captures a local output idempotently and never accepts another channel as a 
   expect(service.scenario('scenario-basic')?.outputs).toHaveLength(1)
 })
 
-it('fails closed when the structured Runtime snapshot is unavailable and reviewer prose cannot replace Oracle results', () => {
+it('fails closed when the structured Runtime snapshot is unavailable', () => {
   const service = reporter({ snapshot: () => { throw new Error('database unavailable') } })
   service.registerScenario(baseScenario({ oracle: { assertions: [{ kind: 'ticket-count', count: 0 }] } }))
   service.submit(envelope())
-  expect(service.reviewEvidence('scenario-basic')).toMatchObject({ snapshot_available: false, runtime: null })
-  const result = service.recordReview('scenario-basic', { summary: 'Everything looks fine.', findings: [] })
-  expect(result.review?.summary).toBe('Everything looks fine.')
   const completed = service.completeScenario('scenario-basic')
   expect(completed).toMatchObject({ snapshot_available: false, behavioral_pass: false, oracle: { passed: false, snapshot_available: false } })
   expect(completed.oracle.checks[0]).toMatchObject({ passed: false, actual: { unavailable: 'snapshot_unavailable' } })
@@ -107,14 +104,13 @@ it('persists events and can deterministically replay and export them after a res
   first.registerScenario(baseScenario())
   first.submit(envelope())
   first.completeScenario('scenario-basic')
-  first.recordUsage('scenario-basic', { role: 'user-simulator', model: 'cheap-model', prompt_tokens: 3, completion_tokens: 2, cost_usd: 0.001, latency_ms: 40, retries: 0 })
   const expected = first.replayScenario('scenario-basic')
   const restarted = reporter({ stateDir, receive: vi.fn(() => 'stored' as const) })
   expect(restarted.submit(envelope())).toMatchObject({ duplicate: true, disposition: 'stored' })
   expect(restarted.replayScenario('scenario-basic')).toEqual(expected)
   const exported = restarted.exportScenario('scenario-basic')!
   expect(exported.sha256).toMatch(/^[a-f0-9]{64}$/)
-  expect(exported.records.at(-1)).toMatchObject({ type: 'usage.recorded', usage: { role: 'user-simulator' } })
+  expect(exported.records.at(-1)).toMatchObject({ type: 'scenario.completed' })
   expect(JSON.parse(readFileSync(join(stateDir, 'reporter', readdirSync(join(stateDir, 'reporter'))[0]!), 'utf8').trim().split('\n')[0]!))
     .toMatchObject({ type: 'scenario.registered' })
 })
@@ -148,11 +144,10 @@ it('runs a multi-actor, time-ordered script with reviews, CI, stops, duplicate d
     { actor_id: 'alice', action: { kind: 'stop', text: 'Please stop the work.' }, sequence: 9, expect_error: 'sequence_out_of_order' },
     { actor_id: 'alice', action: { kind: 'stop', text: 'Please stop the work.' }, after_ms: 2_000 },
   ] })
-  expect(result).toMatchObject({ accepted: 5, duplicate_responses: 1, rejected: 1, simulator_cost_usd: 0, model_calls: 0,
+  expect(result).toMatchObject({ accepted: 5, duplicate_responses: 1, rejected: 1,
     errors: [{ step: 5, code: 'sequence_out_of_order' }] })
   expect(service.scenario('scenario-basic')?.inputs.map(item => item.trigger)).toEqual(expect.arrayContaining([
     expect.objectContaining({ human: false, meta: expect.objectContaining({ kind: 'review', isPr: true }) }),
     expect.objectContaining({ human: false, meta: expect.objectContaining({ ci: true }) }),
   ]))
-  expect(service.scenario('scenario-basic')?.usage).toMatchObject([{ role: 'user-simulator', model: 'deterministic-script', cost_usd: 0 }])
 })
