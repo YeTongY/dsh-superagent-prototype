@@ -106,7 +106,13 @@ export class ReporterAutonomousRuns {
     for (const name of host.store.keys(KV.reporter.runs)) {
       const id = name.slice(KV.reporter.runs.prefix.length)
       const record = host.store.get(KV.reporter.runs(id))
-      if (record) this.records.set(record.view.id, record)
+      if (record) {
+        if (record.view.model?.provider === 'dsh-default' && record.view.model.model === 'dsh-default') {
+          delete record.view.model
+          host.store.set(KV.reporter.runs(id), record)
+        }
+        this.records.set(record.view.id, record)
+      }
     }
   }
 

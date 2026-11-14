@@ -125,6 +125,21 @@ describe('Reporter DSH Session projection', () => {
     expect(runs.list()[0]).not.toHaveProperty('model')
   })
 
+  it('removes the legacy placeholder model from restored run projections', async () => {
+    const first = new ReporterAutonomousRuns(h.host)
+    const run = await first.start(request())
+    const key = KV.reporter.runs(run.id)
+    const legacy = h.saved.get(key)!
+    legacy.view.model = { provider: 'dsh-default', model: 'dsh-default', reasoningEffort: 'xhigh' }
+    h.saved.set(key, legacy)
+
+    const restored = new ReporterAutonomousRuns(h.host)
+
+    expect(restored.get(run.id)).not.toHaveProperty('model')
+    expect(h.saved.get(key)?.view).not.toHaveProperty('model')
+    expect(restored.get(run.id)?.status).toBe('waiting')
+  })
+
   it('preserves a report committed while native DSH cancellation is draining', async () => {
     let finishCancellation!: () => void
     let cancellationStarted!: () => void
