@@ -5,6 +5,9 @@ import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type De
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
+import type { ResolvedProject } from '../project-source.ts'
+import { gitlabConfigDirConflicts, resolveGitlabProject, validateGitlabConfigDirs } from '../infra/gitlab.ts'
+import { normalizeHost, normalizeProject, projectSourceId } from '../project-source.ts'
 
 export interface SetupHost {
   readonly context: Context
@@ -13,9 +16,16 @@ export interface SetupHost {
   restart(): void
 }
 
-const setupFields = (settings: Settings) =>
-  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
+const setupFields = (settings: Settings, includeEnabled = true) =>
+  JSON.stringify([...new Set([...Object.keys(SETUP_FIELDS), ...Object.keys(settings.sources)])].sort().flatMap(id => {
+    const value = settings.sources[id]
+    const kind = value?.kind ?? id
+    const keys = SETUP_FIELDS[kind]
+    return keys ? [[id, kind, ...(includeEnabled ? [value?.enabled ?? true] : []), keys.map(key => value?.config[key] ?? '')]] : []
+  }))
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
+/** 开关可以通过明确的配置请求修改；更换账号或执行配置仅允许管理面板。 */
+export const accountsChanged = (before: Settings, after: Settings): boolean => setupFields(before, false) !== setupFields(after, false)
 
 /**
  * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
@@ -60,9 +70,19 @@ export class Setup {
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
-    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
-      : resolveDeployment(machine, settings.sources.github?.config, this.probe())
-    await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
+    if (!block.startsWith('source:')) return
+    const id = block.slice(7), source = settings.sources[id], kind = source?.kind ?? id
+    if (source?.enabled === false) return
+    if (kind === 'feishu') await resolveFeishuBot(machine, source?.config, this.probe())
+    else if (kind === 'gitlab') {
+      const resolved = { ...await resolveGitlabProject(source?.config, this.probe(), machine, this.path), id }
+      const peers = Object.values(this.resolved?.projects ?? {}).filter(project => project.provider === 'gitlab' && project.id !== id)
+      const identity = projectSourceId('gitlab', resolved.host, resolved.project)
+      const duplicate = peers.find(project => projectSourceId('gitlab', project.host, project.project) === identity)
+      if (duplicate) throw new SetupError('gitlabProjectRepeated', { host: resolved.host, project: resolved.project, otherSource: duplicate.id })
+      validateGitlabConfigDirs([...peers, resolved])
+    }
+    else if (kind === 'github') await resolveDeployment(machine, source?.config, this.probe(), this.path)
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
@@ -76,7 +96,50 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    const stored = Object.entries(settings.sources).filter(([id, value]) => ['github', 'gitlab'].includes(value.kind ?? id))
+    // 没有新项目配置时保留旧单 GitHub 的 setup 诊断。
+    if (!stored.length) stored.push(['github', { enabled: true, config: {} }])
+    const projects: Record<string, ResolvedProject> = {}, projectProblems: Record<string, SetupProblem> = {}
+    const gitlabIdentities = new Map<string, { id: string; host: string; project: string }>()
+    for (const [id, value] of stored) {
+      if (!value.enabled) continue
+      const provider = value.kind ?? id
+      try {
+        if (provider === 'gitlab') {
+          const project = { ...await resolveGitlabProject(value.config, probe, machine, this.path), id }
+          const identity = projectSourceId('gitlab', project.host, project.project)
+          const previous = gitlabIdentities.get(identity)
+          if (previous) throw new SetupError('gitlabProjectRepeated', { host: project.host, project: project.project, otherSource: previous.id })
+          gitlabIdentities.set(identity, { id, host: project.host, project: project.project })
+          projects[id] = project
+        }
+        else {
+          const resolved = await resolveDeployment(machine, value.config, probe, this.path)
+          projects[id] = { id, provider: 'github', host: 'github.com', project: resolved.repository, ...resolved.github,
+            ...(typeof value.config.configDir === 'string' ? { configDir: value.config.configDir } : {}),
+            ...(value.config.environment ? { environment: value.config.environment as Record<string, string> } : {}) }
+        }
+      } catch (error) {
+        if (!(error instanceof SetupError)) throw error
+        projectProblems[id] = error.problem
+        context.logger.warn('ProjectSource %s setup failed: %s', id, error.problem.code)
+      }
+    }
+    for (const conflict of gitlabConfigDirConflicts(Object.values(projects).filter(project => project.provider === 'gitlab'))) {
+      const { project, previous } = conflict
+      const id = project.id
+      const error = new SetupError('gitlabConfigDirShared', { host: project.host, project: project.project,
+        otherProject: previous.project, sourceId: project.id, otherSource: previous.id })
+      projectProblems[id] = error.problem
+      delete projects[id]
+      context.logger.warn('ProjectSource %s setup failed: %s', id, error.problem.code)
+    }
+    const first = projects.github ?? Object.values(projects)[0]
+    if (!first && Object.values(projectProblems)[0]) {
+      const problem = Object.values(projectProblems)[0]!
+      throw new SetupError(problem.code, problem.values)
+    }
+    const deployment: Deployment = { ...machine, repository: first?.project ?? '', github: { cli: first?.cli ?? '', login: first?.login ?? '', noreply: first?.noreply ?? '' }, projects, projectProblems }
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem

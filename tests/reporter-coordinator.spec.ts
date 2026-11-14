@@ -1,0 +1,136 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, it, vi } from 'vitest'
+import { createLocalReporter } from '../src/reporter/local-reporter.ts'
+import type { LocalReporter } from '../src/reporter/local-reporter.ts'
+import { runQualitativeReviewer, runUserSimulator, type ReporterModelInvoker, type ReporterModelRequest } from '../src/reporter/coordinator.ts'
+import type { ReporterProjectIdentity, ReporterRuntimeSnapshot } from '../src/reporter/protocol.ts'
+
+const project: ReporterProjectIdentity = { id: 'github-0123456789abcdef01234567', provider: 'github', host: 'github.com', project: 'acme/widgets' }
+const definitions = (id = 'coordinator-scenario') => ({ id, version: 1, project_source_id: project.id, thread_id: '17', thread_kind: 'issue',
+  visible: { persona: '仓库维护者', goal: '根据进展决定下一步' }, actors: [{ id: 'alice', role: 'person' }],
+  oracle: { assertions: [{ kind: 'ticket-count', count: 9 }] } })
+
+let directories: string[] = []
+afterEach(() => { for (const directory of directories) rmSync(directory, { recursive: true, force: true }); directories = [] })
+
+function createReporter(): LocalReporter {
+  const stateDir = mkdtempSync(join(tmpdir(), 'reporter-coordinator-'))
+  directories.push(stateDir)
+  const snapshot: ReporterRuntimeSnapshot = { triggers: [], decisions: [], tickets: [] }
+  const reporter = createLocalReporter({ stateDir, enabled: true, resolveProject: id => id === project.id ? project : undefined,
+    receive: () => 'stored', snapshot: () => snapshot })
+  reporter.registerScenario(definitions())
+  return reporter
+}
+
+const actionResponse = { output: { kind: 'action', actor_id: 'alice', action: { kind: 'message', text: '请继续检查这个问题。' } },
+  usage: { model: 'fake-model', prompt_tokens: 10, completion_tokens: 5, cost_usd: 0.001, retries: 0 } }
+const finishResponse = { output: { kind: 'finished' },
+  usage: { model: 'fake-model', prompt_tokens: 8, completion_tokens: 2, cost_usd: 0.001, retries: 0 } }
+
+it('runs a multi-turn fake Simulator and completes after the injected model ends the conversation', async () => {
+  const reporter = createReporter(), requests: ReporterModelRequest[] = []
+  const invoke: ReporterModelInvoker = vi.fn(async request => {
+    requests.push(request)
+    return requests.length === 1 ? actionResponse : finishResponse
+  })
+  const waitForSuperagent = vi.fn(async () => {})
+
+  const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent, maxTurns: 3 })
+
+  expect(result).toMatchObject({ status: 'completed', stop_reason: 'simulator_finished', turns: 1, usage: { calls: 2, cost_usd: 0.002 } })
+  expect(invoke).toHaveBeenCalledTimes(2)
+  expect(waitForSuperagent).toHaveBeenCalledTimes(2)
+  expect(requests[1]?.input).not.toHaveProperty('oracle')
+  expect(reporter.scenario('coordinator-scenario')?.inputs).toHaveLength(1)
+})
+
+it.each([{ max_cost_usd: 0 }, { max_total_tokens: 0 }])('does not call a model when its initial budget is exhausted: %o', async budget => {
+  const reporter = createReporter(), invoke = vi.fn(async () => actionResponse)
+  const submit = vi.spyOn(reporter, 'submit')
+
+  const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {}, budget })
+
+  expect(result).toMatchObject({ status: 'incomplete', stop_reason: 'budget_exhausted', usage: { calls: 0, cost_usd: null } })
+  expect(invoke).not.toHaveBeenCalled()
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('stops before another fake model call when the previous response exactly used the cost budget', async () => {
+  const reporter = createReporter(), invoke = vi.fn(async () => actionResponse)
+
+  const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {},
+    budget: { max_cost_usd: 0.001 } })
+
+  expect(result).toMatchObject({ status: 'incomplete', stop_reason: 'budget_exhausted', turns: 1, usage: { calls: 1, cost_usd: 0.001 } })
+  expect(invoke).toHaveBeenCalledOnce()
+  expect(reporter.scenario('coordinator-scenario')?.inputs).toHaveLength(1)
+})
+
+it('stops before submitting a generated action when required model cost is unknown', async () => {
+  const reporter = createReporter(), invoke = vi.fn(async () => ({ output: actionResponse.output }))
+  const submit = vi.spyOn(reporter, 'submit')
+
+  const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {},
+    budget: { max_cost_usd: 1 } })
+
+  expect(result).toMatchObject({ status: 'incomplete', stop_reason: 'usage_unknown', usage: { calls: 1, cost_usd: null } })
+  expect(submit).not.toHaveBeenCalled()
+  expect(reporter.scenario('coordinator-scenario')?.usage[0]).toMatchObject({ role: 'user-simulator', latency_ms: expect.any(Number) })
+})
+
+it('does not invoke a fake Simulator after cancellation and records timed-out calls with unknown cost', async () => {
+  const cancelledReporter = createReporter(), cancelled = new AbortController(), cancelledInvoke = vi.fn(async () => actionResponse)
+  cancelled.abort()
+  const cancelledResult = await runUserSimulator({ reporter: cancelledReporter, scenarioId: 'coordinator-scenario', invoke: cancelledInvoke,
+    waitForSuperagent: async () => {}, signal: cancelled.signal })
+
+  expect(cancelledResult).toMatchObject({ stop_reason: 'aborted', usage: { calls: 0, cost_usd: null } })
+  expect(cancelledInvoke).not.toHaveBeenCalled()
+
+  const timeoutReporter = createReporter(), timeoutInvoke: ReporterModelInvoker = async () => new Promise(() => {})
+  const timeoutResult = await runUserSimulator({ reporter: timeoutReporter, scenarioId: 'coordinator-scenario', invoke: timeoutInvoke,
+    waitForSuperagent: async () => {}, budget: { max_cost_usd: 1, timeout_ms: 20 } })
+
+  expect(timeoutResult).toMatchObject({ stop_reason: 'timeout', usage: { calls: 1, cost_usd: null } })
+  expect(timeoutReporter.scenario('coordinator-scenario')?.usage[0]).toMatchObject({ role: 'user-simulator', latency_ms: expect.any(Number) })
+})
+
+it('rejects extra Simulator output fields before submitting an action', async () => {
+  const reporter = createReporter(), submit = vi.spyOn(reporter, 'submit')
+  const invoke = vi.fn(async () => ({ output: { ...actionResponse.output, oracle: { passed: true } }, usage: actionResponse.usage }))
+
+  const result = await runUserSimulator({ reporter, scenarioId: 'coordinator-scenario', invoke, waitForSuperagent: async () => {} })
+
+  expect(result).toMatchObject({ status: 'invalid_output', stop_reason: 'invalid_output', error_code: 'invalid_simulator_output' })
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('keeps hidden Oracle evidence away from Reviewer input and rejects attempts to override deterministic results', async () => {
+  const reporter = createReporter()
+  reporter.completeScenario('coordinator-scenario')
+  const requests: ReporterModelRequest[] = []
+  const malicious: ReporterModelInvoker = vi.fn(async request => {
+    requests.push(request)
+    return { output: { summary: '全部通过', findings: [], behavioral_pass: true }, usage: actionResponse.usage }
+  })
+
+  const rejected = await runQualitativeReviewer({ reporter, scenarioId: 'coordinator-scenario', invoke: malicious })
+
+  expect(rejected).toMatchObject({ status: 'invalid_output', stop_reason: 'invalid_output', report: { behavioral_pass: false } })
+  expect(JSON.stringify(requests[0]?.input)).not.toContain('oracle')
+  expect(JSON.stringify(requests[0]?.input)).not.toContain('"count":9')
+  expect(reporter.scenario('coordinator-scenario')?.review).toBeUndefined()
+
+  const valid: ReporterModelInvoker = vi.fn(async request => {
+    requests.push(request)
+    return { output: { summary: '记录了可见会话。', findings: [{ severity: 'info', text: '对话已结束。', evidence: ['sequence:1'] }] },
+      usage: actionResponse.usage }
+  })
+  const recorded = await runQualitativeReviewer({ reporter, scenarioId: 'coordinator-scenario', invoke: valid })
+
+  expect(recorded).toMatchObject({ status: 'recorded', report: { behavioral_pass: false, review: { summary: '记录了可见会话。' } } })
+  expect(requests[1]?.input).not.toHaveProperty('oracle')
+})

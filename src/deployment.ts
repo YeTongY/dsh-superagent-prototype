@@ -8,6 +8,7 @@ import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import { ProjectEnvironmentSchema, type ResolvedProject } from './project-source.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
@@ -45,12 +46,18 @@ export function machineOf(config: DeploymentConfig): Machine {
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
+  host: z.string().trim().optional(),
+  configDir: z.string().trim().refine(value => value.startsWith('/'), '配置目录必须是绝对路径').optional(),
+  environment: ProjectEnvironmentSchema.unwrap().optional(),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), gitlab: ['repository', 'host', 'cli', 'configDir', 'environment'], feishu: Object.keys(FeishuBotSchema.shape) }
 
 export interface Deployment extends Machine {
+  projects?: Record<string, ResolvedProject>
+  projectProblems?: Record<string, import('./setup.ts').SetupProblem>
+  activeProject?: ResolvedProject
   repository: string
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
@@ -87,16 +94,18 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
+  if (accounts.host && accounts.host.toLowerCase() !== 'github.com') throw new SetupError('repositoryUnreadable', { repository: accounts.repository, account: '', output: '当前 GitHub 适配器仅支持 github.com；内网项目请使用 GitLab Provider。' })
+  const scopedProbe: Probe = argv => accounts.configDir || accounts.environment ? probe(['env', ...Object.entries(accounts.environment ?? {}).map(([key, value]) => `${key}=${value}`), ...(accounts.configDir ? [`GH_CONFIG_DIR=${accounts.configDir}`] : []), ...argv]) : probe(argv)
   const remote = accounts.repository
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
-  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
+  const text = await scopedProbe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+  const access = parsed(RepositoryAccess, await scopedProbe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
     throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
   }))
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })

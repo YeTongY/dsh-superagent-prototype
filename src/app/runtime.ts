@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, latestReport, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -34,6 +34,9 @@ import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
+import { gitlabMergeRequestEndNotices } from '../sources/gitlab-pull.ts'
+import { createLocalReporter, type LocalReporter } from '../reporter/local-reporter.ts'
+import type { ReporterRuntimeSnapshot } from '../reporter/protocol.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -46,6 +49,8 @@ import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
+import type { TriggerContext } from '../sources/kind.ts'
+import { projectForTrigger } from '../project-source.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
@@ -70,6 +75,8 @@ export class Runtime extends Service implements SourceHost {
   readonly outbox: Outbox
   readonly engine: Engine
   readonly passes: Passes
+  readonly reporter?: LocalReporter
+  private readonly reporterToken?: string
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
@@ -100,7 +107,8 @@ export class Runtime extends Service implements SourceHost {
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu,
+        () => Object.entries(store.settings().sources).some(([id, source]) => (source.kind ?? id) === 'gitlab' && source.enabled))
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
@@ -129,13 +137,15 @@ export class Runtime extends Service implements SourceHost {
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
-        settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
+        settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => this.reporterThreadContext(trigger) ?? sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused(),
+        capture: message => this.reporter?.capture(message) ?? false })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+          if (this.reporter) store.afterCommit(() => this.reporter?.observe(event))
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -148,7 +158,16 @@ export class Runtime extends Service implements SourceHost {
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            const follow = ended.follows?.filter(item => item.closed).sort((a, b) => b.closed!.at.localeCompare(a.closed!.at))[0]
+            const id = follow?.thread.split(':')[0] ?? sourceTrigger(this, ended)?.source ?? 'github'
+            const project = setup.deployment.projects?.[id]
+            if (project?.provider === 'gitlab') {
+              for (const message of gitlabMergeRequestEndNotices(ended, request, id, project.host, project.project)) outbox.send(message)
+            } else {
+              const context = this.context({ kind: 'github', id, health: [] })
+              const local = context.tickets.get(ended.id) ?? ended
+              for (const message of pullEndNotices(local, request, context.deployment.repository)) context.notify(message)
+            }
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -156,11 +175,31 @@ export class Runtime extends Service implements SourceHost {
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
+      if (process.env.DSH_SUPERAGENT_REPORTER_ENABLED === '1') {
+        const token = process.env.DSH_SUPERAGENT_REPORTER_TOKEN
+        if (!token || token.length < 32) throw new Error('启用本地 Reporter 需要至少 32 字符的 DSH_SUPERAGENT_REPORTER_TOKEN')
+        this.reporterToken = token
+        this.reporter = createLocalReporter({ stateDir: machine.stateDir, enabled: true,
+          resolveProject: id => {
+            if (!setup.configured() || !sources.instance(id)?.enabled) return undefined
+            const project = setup.deployment.projects?.[id]
+            if (project) return project
+            return id === 'github' ? { id, provider: 'github', host: 'github.com', project: setup.deployment.repository } : undefined
+          }, receive: trigger => this.receive(trigger), lookup: id => {
+            if (!store.triggers.get(id)) return undefined
+            return store.triggers.disposition(id)?.filtered ? 'filtered' : 'stored'
+          }, snapshot: (_scenario, ids) => this.reporterSnapshot(ids) })
+      }
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        sourceContext: ticket => {
+          const origin = sourceTrigger(this, ticket)
+          const project = projectForTrigger(setup.deployment, origin)
+          return this.context({ kind: project?.provider ?? 'github', id: project?.id ?? 'github', health: [] })
+        },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -173,7 +212,7 @@ export class Runtime extends Service implements SourceHost {
   get health(): Readonly<Record<string, Health>> { return this.board.all }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
-  context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  context(kind: { kind: string; health: readonly string[]; id?: string }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
@@ -192,6 +231,37 @@ export class Runtime extends Service implements SourceHost {
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  private reporterThreadContext(trigger: Trigger): TriggerContext | undefined {
+    if (!this.reporter || trigger.channel?.source !== 'local-reporter') return undefined
+    return { messageId: trigger.id, images: () => [], image: async () => { throw new Error('Reporter 没有图片附件') },
+      read: async (_commands, part) => {
+        const thread = trigger.threads[0]
+        const history = thread ? this.store.read.threadTriggers(`${thread.source}:${thread.id}`, 100)
+          .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id)) : [trigger]
+        const index = history.findIndex(item => item.id === trigger.id)
+        const selected = part === 'root' ? history.slice(0, 1) : part === 'parent' ? (index > 0 ? history.slice(index - 1, index) : []) : history
+        const messages = selected.map(item => ({ id: item.id, from: item.actor.id, at: item.at, text: item.text, ...!item.human ? { bot: true as const } : {} }))
+        return { messages, body: { messages } }
+      } }
+  }
+  private reporterSnapshot(ids: string[]): ReporterRuntimeSnapshot {
+    const selected = new Set(ids)
+    const triggers = ids.map(id => ({ id, disposition: this.store.triggers.disposition(id) }))
+    const decisionIds = new Set(triggers.flatMap(trigger => trigger.disposition?.decisionId ?? []))
+    const decisions = [...decisionIds].flatMap(id => {
+      const decision = this.store.decisions.get(id)
+      return decision ? [{ id, kind: decision.kind, triggerIds: decision.triggerIds, ...decision.ticketId ? { ticketId: decision.ticketId } : {} }] : []
+    })
+    const ticketIds = new Set(triggers.flatMap(trigger => trigger.disposition?.fanout ?? []))
+    for (const decision of decisions) if (decision.ticketId) ticketIds.add(decision.ticketId)
+    const tickets = this.store.tickets.list().filter(ticket => ticketIds.has(ticket.id) || ticket.origin.triggerIds.some(id => selected.has(id)))
+      .map(ticket => ({ id: ticket.id, originTriggerIds: ticket.origin.triggerIds,
+        state: ticket.ended ? 'ended' as const : 'open' as const,
+        ...ticket.ended ? { outcome: ticket.ended.outcome } : {},
+        ...latestReport(ticket) ? { reportState: latestReport(ticket)!.state } : {},
+        ...ticket.attention ? { attention: { question: ticket.attention.question, ...ticket.attention.triggerId ? { triggerId: ticket.attention.triggerId } : {} } } : {} }))
+    return { triggers, decisions, tickets }
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
@@ -220,6 +290,7 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      ...this.reporter && this.reporterToken ? { reporter: { client: this.reporter, token: this.reporterToken } } : {},
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

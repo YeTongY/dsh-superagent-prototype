@@ -2,6 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
+import { ReporterError, type LocalReporter } from '../reporter/local-reporter.ts'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
@@ -35,7 +37,7 @@ export interface HttpHost {
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
-  readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
+  readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'> & Partial<Pick<Settings, 'createProject'>>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
@@ -43,6 +45,8 @@ export interface HttpHost {
   readonly masterId: string
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
+  /** 仅显式测试配置挂载；capability 不进入任何管理视图。 */
+  readonly reporter?: { client: LocalReporter; token: string }
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
@@ -79,6 +83,7 @@ export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number):
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
+  if (error instanceof ReporterError) return [error.status, { error: error.message, code: error.code }]
   if (error instanceof z.ZodError) {
     const issues = error.issues.map(issue => ({ path: issue.path.join('.'), message: issue.message }))
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
@@ -116,7 +121,7 @@ export type StateView = ReturnType<typeof stateView>
 function ticketPage(runtime: HttpHost, id: string) {
   const detail = ticketDetail(views(runtime), id), ticket = runtime.store.tickets.get(id)
   if (!detail || !ticket) throw new RouteError(404, 'Ticket not found')
-  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [] }
+  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket).filter(variable => !variable.hidden) : [] }
 }
 export type TicketPageView = ReturnType<typeof ticketPage>
 function promptsView(runtime: HttpHost, revision: number | undefined, offset: number) {
@@ -158,6 +163,11 @@ function routes(runtime: HttpHost): Routes {
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
+    'POST projects': async ({ body }) => {
+      const input = z.object({ provider: z.enum(['github', 'gitlab']), config: z.record(z.string(), z.unknown()), enabled: z.boolean().default(true) }).strict().parse(await body())
+      if (!runtime.settings.createProject) throw new RouteError(404, 'Project management unavailable')
+      return runtime.settings.createProject(input.provider, input.config, input.enabled)
+    },
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
     'GET threads': ({ query }) => {
@@ -233,9 +243,42 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
-      if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
+      const reporterPath = url.pathname.startsWith('/orchestrator/reporter/')
+      if (!url.pathname.startsWith('/orchestrator/api/') && !reporterPath) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
+        if (reporterPath) {
+          const reporter = runtime.reporter
+          if (!reporter) throw new RouteError(404, 'Local Reporter is disabled')
+          const authorization = req.headers.authorization ?? ''
+          const expected = Buffer.from(`Bearer ${reporter.token}`)
+          const provided = Buffer.from(authorization)
+          if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+            json(res, 401, { error: 'Reporter capability required', code: 'unauthorized' }); return
+          }
+          await runtime.ready
+          const path = url.pathname.slice('/orchestrator/reporter/'.length).split('/').map(decoded)
+          if (req.method === 'POST' && path.length === 1 && path[0] === 'scenarios') {
+            json(res, 200, reporter.client.registerScenario(await readBody(req))); return
+          }
+          if (req.method === 'POST' && path.length === 1 && path[0] === 'events') {
+            json(res, 200, reporter.client.submit(await readBody(req, 64 * 1024))); return
+          }
+          if (req.method === 'POST' && path.length === 3 && path[0] === 'scenarios') {
+            const id = path[1]!
+            if (path[2] === 'complete') { json(res, 200, reporter.client.completeScenario(id)); return }
+            if (path[2] === 'review') { json(res, 200, reporter.client.recordReview(id, await readBody(req))); return }
+            if (path[2] === 'usage') { reporter.client.recordUsage(id, await readBody(req)); json(res, 200, { recorded: true }); return }
+          }
+          if (req.method === 'GET' && path[0] === 'scenarios' && (path.length === 2 || path.length === 3)) {
+            const result = path.length === 2 ? reporter.client.scenario(path[1]!) : path[2] === 'trace' ? reporter.client.exportScenario(path[1]!)
+              : path[2] === 'replay' ? reporter.client.replayScenario(path[1]!) : path[2] === 'simulator' ? reporter.client.simulatorScenario(path[1]!)
+                : path[2] === 'review-input' ? reporter.client.reviewEvidence(path[1]!) : undefined
+            if (!result) throw new RouteError(404, 'Scenario not found')
+            json(res, 200, result); return
+          }
+          throw new RouteError(404, 'Unknown Reporter operation')
+        }
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')

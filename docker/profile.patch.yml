@@ -1,0 +1,8 @@
+# 容器专用覆盖层：让管理 API 和 Reporter 保持 loopback 边界，并将运行数据放到持久卷。
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3082
+- id: dsh-superagent
+  config:
+    stateDir: /data/superagent

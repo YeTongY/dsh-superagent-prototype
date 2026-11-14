@@ -11,6 +11,8 @@ export type ScopeResult = { listened: true; observed: boolean; row?: string } | 
 /** Source configuration as the domain sees it: listening scope per trigger or per recorded Mandate basis. */
 export interface SourceScope {
   scope(input: { source: string; meta: Record<string, unknown> }): ScopeResult
+  /** 项目的权威边界；非项目来源可不提供此映射。 */
+  project?(source: string): string | undefined
 }
 
 /** Versioned rules; `gate` decides who may originate work. Source scope is not part of Policy. */

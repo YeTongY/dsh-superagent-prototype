@@ -3,6 +3,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
+import { readGitlab } from '../sources/gitlab-read.ts'
+import { projectForTrigger } from '../project-source.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
@@ -52,6 +54,8 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
+  { name: 'gitlab/…', holds: 'an original in the ticket GitLab project', executor: true },
+  { name: 'project/<source-id>/<github|gitlab>/…', holds: 'an original in an explicitly selected project; workers can only select their own project', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
@@ -107,6 +111,30 @@ async function sourcePage(read: Read, source: string, fetch: () => Promise<unkno
   if (body === undefined) throw new Error(`Read this ${source === 'feishu' ? 'Feishu' : 'GitHub'} resource from offset 0 first`)
   if (offset === 0) host.pages.set(`${sessionId}:${resource}`, body)
   return text(read, body)
+}
+/** 项目选择在读取入口完成，禁止 Worker 通过资源路径切换到其他项目。 */
+function projectCommands(read: Read, source?: string): Commands {
+  const ticket = read.ticketId ? read.host.store.tickets.get(read.ticketId) : undefined
+  const origin = ticket ? read.host.store.triggers.get(ticket.origin.triggerId) : undefined
+  const deployment = read.host.commands.deployment
+  if (source && deployment?.projects && !deployment.projects[source]) throw new Error('The project has not completed setup')
+  if (!ticket && !source && Object.keys(deployment?.projects ?? {}).length > 1) throw new Error('Select a project explicitly with project/<source-id>/…')
+  const selected = ticket || (!source && Object.keys(deployment?.projects ?? {}).length === 1) ? projectForTrigger(deployment, origin) : undefined
+  if (source && ticket && source !== (selected?.id ?? origin?.source)) throw new Error('The project does not belong to this ticket')
+  const id = source ?? selected?.id ?? origin?.source
+  return (id ? read.host.commands.forSource?.(id) ?? read.host.commands : read.host.commands).withSignal(read.signal)
+}
+async function projectPage(read: Read, provider: 'github' | 'gitlab', resource: string, source?: string) {
+  const commands = projectCommands(read, source)
+  const active = commands.deployment?.activeProject
+  if (active && active.provider !== provider) throw new Error('Resource provider does not match this project')
+  return sourcePage(read, provider, async () => {
+    const result: unknown = provider === 'github' ? await readGithub(commands, resource) : await readGitlab(commands, resource)
+    if (source && result && typeof result === 'object' && 'next_resource' in result && typeof result.next_resource === 'string') {
+      return { ...result, next_resource: `project/${source}/${result.next_resource}` }
+    }
+    return result
+  })
 }
 const THREAD_DECISIONS = 5
 const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trigger.actor.id, human: trigger.human, at: trigger.at,
@@ -206,7 +234,13 @@ const ROUTES: readonly Route[] = [
     const commands = read.host.commands.withSignal(read.signal)
     return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
   }],
-  ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['github/', read => projectPage(read, 'github', read.resource)],
+  ['gitlab/', read => projectPage(read, 'gitlab', read.resource)],
+  ['project/', read => {
+    const [source, provider, ...path] = read.rest.split('/')
+    if (!source || (provider !== 'github' && provider !== 'gitlab') || !path.length) throw new Error('Use project/<source-id>/<github|gitlab>/…')
+    return projectPage(read, provider, `${provider}/${path.join('/')}`, source)
+  }],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')

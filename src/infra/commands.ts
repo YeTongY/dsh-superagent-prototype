@@ -4,6 +4,8 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
+import { deploymentForSource } from '../project-source.ts'
+import { CREDENTIAL_ENVIRONMENT, TLS_BYPASS_ENVIRONMENT, workerGitConfig } from './environment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -64,11 +66,21 @@ export class Commands {
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
+  forSource(source: string): Commands {
+    if (!this.deployment.projects?.[source]) {
+      if (source === 'feishu' || !this.deployment.projects) return this
+      throw new Error(`项目尚未完成部署检查：${source}`)
+    }
+    const project = this.deployment.projects[source]!
+    return new Commands(() => deploymentForSource(this.deployment, source), { ...this.environment, ...project.environment, GIT_CONFIG_GLOBAL: workerGitConfig(this.deployment.stateDir, source),
+      ...(project.configDir ? { [project.provider === 'gitlab' ? 'GLAB_CONFIG_DIR' : 'GH_CONFIG_DIR']: project.configDir } : {}) }, this.signal)
+  }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment, ...Object.fromEntries([...CREDENTIAL_ENVIRONMENT, ...TLS_BYPASS_ENVIRONMENT].map(key => [key, undefined])),
+          GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }

@@ -8,6 +8,22 @@ import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
+import type { LocalReporter, ReporterReview, ReporterUsage } from '../reporter/local-reporter.ts'
+import type { ReporterEnvelope, ReporterScenarioDefinition } from '../reporter/protocol.ts'
+
+/** 独立 capability 保护的测试接口；路径相对 /orchestrator/reporter/。 */
+export interface ReporterApi {
+  'POST scenarios': { body: ReporterScenarioDefinition; response: ReturnType<LocalReporter['registerScenario']> }
+  'POST events': { body: ReporterEnvelope; response: ReturnType<LocalReporter['submit']> }
+  'GET scenarios/:id': { response: ReturnType<LocalReporter['scenario']> }
+  'GET scenarios/:id/simulator': { response: ReturnType<LocalReporter['simulatorScenario']> }
+  'GET scenarios/:id/review-input': { response: ReturnType<LocalReporter['reviewEvidence']> }
+  'GET scenarios/:id/trace': { response: ReturnType<LocalReporter['exportScenario']> }
+  'GET scenarios/:id/replay': { response: ReturnType<LocalReporter['replayScenario']> }
+  'POST scenarios/:id/complete': { response: ReturnType<LocalReporter['completeScenario']> }
+  'POST scenarios/:id/review': { body: ReporterReview; response: ReturnType<LocalReporter['recordReview']> }
+  'POST scenarios/:id/usage': { body: ReporterUsage; response: { recorded: true } }
+}
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -22,6 +38,7 @@ export interface Api {
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
+  'POST projects': { body: { provider: 'github' | 'gitlab'; config: Record<string, unknown>; enabled?: boolean }; response: { id: string; revision: number; restarting: boolean } }
   'GET settings': { response: SettingsView }
   'POST sources/:id/labels': { response: { added: string[] } }
   'GET threads': { query?: Paged & { filter?: ThreadFilter }; response: ThreadListView }

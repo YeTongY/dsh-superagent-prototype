@@ -12,7 +12,7 @@ import type { GithubComment, PullRef } from './github-trigger.ts'
 import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
-import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
+import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach, projectPoll } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
 
@@ -112,11 +112,12 @@ export const inject = ['orchestrator']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(githubKind), 'github: source kind')
   ctx.effect(() => {
-    const source = sourceContext(ctx.orchestrator, githubKind)
     const controller = new AbortController()
     // Unhandled rejections terminate the DSH process, so a failure escaping the polling loop is reported as source health instead.
-    const running = watch(source, controller.signal)
-      .catch((error: unknown) => { source.report('github', { state: 'error', detail: String(error) }) })
+    const running = Promise.all(ctx.orchestrator.sources.instances().filter(instance => instance.kind === SOURCE).map(instance => {
+      const source = sourceContext(ctx.orchestrator, { ...githubKind, id: instance.id })
+      return watch(source, controller.signal).catch((error: unknown) => { source.report('github', { state: 'error', detail: String(error) }) })
+    }))
     return async () => { controller.abort(); await running }
   })
 }
@@ -133,7 +134,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   while (!signal.aborted) {
     const config = ctx.config<GithubConfig>(SOURCE)
     try {
-      if (config) interval = await pollRound(ctx, signal)
+      if (config) interval = await projectPoll(() => pollRound(ctx, signal), signal)
       else ctx.report('github', health('paused', 'sourceOff'))
       failures = 0
     } catch (error) {

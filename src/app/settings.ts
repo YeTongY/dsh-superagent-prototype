@@ -10,9 +10,11 @@ import type { SourceRegistry } from '../sources/registry.ts'
 import { resolveRoleModel } from './role-models.ts'
 import { changedPaths, settingsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
-import { setupChanged, type Setup } from './setup.ts'
+import { accountsChanged, setupChanged, type Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
+import { projectSourceId, type ProjectProvider } from '../project-source.ts'
+import { GitlabProjectConfigSchema } from '../infra/gitlab.ts'
 
 /**
  * Indicates an optimistic concurrency conflict when saving or syncing a settings block against a stale revision.
@@ -45,10 +47,10 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
     guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
   },
   source: {
-    parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
+    parse: (value, sources, id) => sources.validate(id, z.object({ kind: z.string().optional(), enabled: z.boolean(), config: z.unknown() }).parse(value)),
     merge: (settings, value, id) => ({ ...settings, sources: { ...settings.sources, [id]: value as SettingsValue['sources'][string] } }),
     // Only the management panel may switch source accounts.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
+    guard: (current, candidate, origin) => { if (origin !== 'panel' && accountsChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
   },
 }
 
@@ -132,7 +134,7 @@ export class Settings {
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
     const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
-      : instance ? { enabled: instance.enabled, config: instance.config } : undefined
+      : instance ? { ...(instance.id !== instance.kind ? { kind: instance.kind } : {}), enabled: instance.enabled, config: instance.config } : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }
   }
@@ -153,7 +155,8 @@ export class Settings {
     const kind = block.startsWith('source:') ? 'source' : block
     if (!(kind in BLOCKS)) throw new UserError('unknownBlock', { block })
     const rules = BLOCKS[kind as keyof typeof BLOCKS]
-    if (kind === 'source' && !sources.kind(id)) throw new UserError('sourceNotInstalled', { source: id })
+    const submittedKind = z.object({ kind: z.string().optional() }).passthrough().safeParse(value)
+    if (kind === 'source' && !sources.kind(id) && !(submittedKind.success && submittedKind.data.kind && sources.kind(submittedKind.data.kind))) throw new UserError('sourceNotInstalled', { source: id })
     const parsed = rules.parse(value, sources, id)
     const current = store.settings()
     const candidate = rules.merge(current, parsed, id)
@@ -193,6 +196,20 @@ export class Settings {
     if (restarting) this.host.setup.restart()
     else this.host.requestPass()
     return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting, context_delivery: delivery }
+  }
+  /** 管理面创建项目，复用版本校验、账号检查和原子设置保存路径。 */
+  async createProject(provider: ProjectProvider, config: Record<string, unknown>, enabled = true) {
+    const host = provider === 'github' ? typeof config.host === 'string' ? config.host : 'github.com' : GitlabProjectConfigSchema.parse(config).host
+    const repository = typeof config.repository === 'string' ? config.repository : ''
+    const id = projectSourceId(provider, host, repository)
+    const exists = Object.entries(this.current().sources).some(([source, value]) => {
+      if (source === id) return true
+      if ((value.kind ?? source) !== provider || typeof value.config.repository !== 'string' || !value.config.repository) return false
+      return projectSourceId(provider, String(value.config.host ?? (provider === 'github' ? 'github.com' : 'gitlab.com')), value.config.repository) === id
+    })
+    if (exists) throw new SettingsConflict('项目已存在')
+    const saved = await this.save(`source:${id}`, { kind: provider, enabled, config }, this.host.store.blockRevision(`source:${id}`), 'panel')
+    return { id, ...saved }
   }
   /**
    * Pauses or resumes processing (new evaluations, worker dispatch, and channel delivery, while Sources continue recording

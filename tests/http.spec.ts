@@ -7,6 +7,38 @@ import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
 
+it('requires both the local request boundary and Reporter capability before accepting a scenario or event', async () => {
+  const calls: unknown[] = []
+  const token = 'reporter-test-capability-with-32-characters'
+  const call = serve({ reporter: { token, client: {
+    submit: (input: unknown) => { calls.push(input); return { stored: true } },
+    registerScenario: (input: unknown) => { calls.push(input); return { registered: true } },
+    scenario: () => undefined, exportScenario: () => ({ events: [] }),
+  } } })
+  expect(await call('POST', '../reporter/events', {})).toMatchObject({ status: 401, body: { code: 'unauthorized' } })
+  expect(await call('POST', '../reporter/events', {}, { authorization: 'Bearer incorrect' })).toMatchObject({ status: 401 })
+  expect(await call('POST', '../reporter/events', {}, { authorization: `Bearer ${token}`, origin: 'http://evil.example' })).toMatchObject({ status: 403 })
+  expect(calls).toEqual([])
+  expect(await call('POST', '../reporter/events', { sequence: 1 }, { authorization: `Bearer ${token}` })).toMatchObject({ status: 200 })
+  expect(calls).toEqual([{ sequence: 1 }])
+  expect(await call('GET', '../reporter/scenarios/missing', undefined, { authorization: `Bearer ${token}` })).toMatchObject({ status: 404 })
+  expect(await call('POST', '../reporter/events', { text: 'x'.repeat(65_536) }, { authorization: `Bearer ${token}` })).toMatchObject({ status: 400 })
+  expect(calls).toHaveLength(1)
+  const disabled = serve({})
+  expect(await disabled('POST', '../reporter/events', {})).toMatchObject({ status: 404 })
+})
+
+it('passes project creation through the validated management service', async () => {
+  const calls: unknown[] = []
+  const call = serve({ settings: { createProject: async (...args: unknown[]) => {
+    calls.push(args); return { id: 'gitlab-project', revision: 1, restarting: true }
+  } } })
+  expect(await call('POST', 'projects', { provider: 'gitlab', config: { host: 'gitlab.internal', repository: 'group/app' } })).toMatchObject({ status: 200 })
+  expect(calls).toEqual([['gitlab', { host: 'gitlab.internal', repository: 'group/app' }, true]])
+  expect(await call('POST', 'projects', { provider: 'other', config: {} })).toMatchObject({ status: 400 })
+  expect(calls).toHaveLength(1)
+})
+
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */

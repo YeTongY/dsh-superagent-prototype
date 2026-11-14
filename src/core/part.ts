@@ -26,6 +26,17 @@ export abstract class EnginePart {
   constructor(protected readonly options: EngineOptions) { this.repo = options.repo }
   protected now(): string { return this.options.now?.() ?? new Date().toISOString() }
   protected policy(): Policy { return this.options.policy() }
+  /** 领域层只比较来源给出的项目身份，不了解 GitHub/GitLab 细节。 */
+  protected assertProject(ticket: Ticket, target: ThreadRef | Trigger): void {
+    const project = this.options.scope.project?.bind(this.options.scope)
+    if (!project) return
+    const of = (value: ThreadRef | Trigger | undefined): string | undefined => {
+      if (!value) return undefined
+      return project(value.source) ?? ('meta' in value && typeof value.meta.projectSourceId === 'string' ? project(value.meta.projectSourceId) : undefined)
+    }
+    const origin = of(this.repo.triggers.get(ticket.origin.triggerId)), destination = of(target)
+    if (origin && destination && origin !== destination) throw new UserError('crossProject', { ticket: ticket.id, project: origin, target: destination })
+  }
   /** The tickets whose worker decides a person's follow-up: see `followupOwners`. */
   protected owners(trigger: Trigger): string[] { return followupOwners(trigger, this.repo) }
   /** Refuse a main-Session routing of a follow-up a ticket's worker still decides. */

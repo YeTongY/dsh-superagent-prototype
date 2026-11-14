@@ -7,6 +7,7 @@ import type { SourceContext } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
+import { projectContext } from '../sources/project-context.ts'
 
 export interface SourceContextDeps {
   readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
@@ -30,15 +31,17 @@ export interface SourceContextDeps {
  * Builds the context for one Source kind. Health reports are restricted to entries declared by the kind and
  * bound to the active registration, becoming no-ops once unregistered.
  */
-export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; health: readonly string[] }): SourceContext {
+export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; health: readonly string[]; id?: string }): SourceContext {
   const { store } = deps
-  const health = deps.sources.healthEntries(kind.health)
-  return {
+  const id = kind.id ?? kind.kind
+  const health = deps.sources.healthEntries(kind.health, id === kind.kind ? undefined : id)
+  const base: SourceContext = {
+    sourceId: id,
     get deployment() { return deps.deployment },
     commands: deps.commands,
     ready: deps.ready,
-    configured: () => deps.configured(),
-    get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    configured: () => deps.configured() && (!(kind.kind === 'github' || kind.kind === 'gitlab') || !deps.deployment.projects || !!deps.deployment.projects[id]),
+    get problem() { return (deps.configured() ? deps.deployment.projectProblems?.[id] : undefined) ?? [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined
@@ -69,4 +72,5 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       health.get(entry)?.set(value)
     },
   }
+  return projectContext(base, kind.kind, id)
 }

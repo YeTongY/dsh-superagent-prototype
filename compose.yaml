@@ -1,0 +1,29 @@
+services:
+  superagent:
+    image: dsh-superagent:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dsh-superagent
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 5m
+    env_file:
+      - path: ./docker/runtime.env
+        required: false
+    environment:
+      DSH_HOME: /data/dsh
+      DSH_SUPERAGENT_PROFILE: superagent
+    volumes:
+      - type: bind
+        source: ${DSH_SUPERAGENT_DATA_DIR:-./.data}
+        target: /data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dsh-superagent-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s

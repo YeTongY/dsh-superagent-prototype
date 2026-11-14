@@ -1,7 +1,7 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu'
+export type SetupPlace = 'deployment' | 'github' | 'gitlab' | 'feishu'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
@@ -14,6 +14,18 @@ export const SETUP_PROBLEMS = {
   repositoryUnreadable: ['github', '@{account} cannot read {repository}.'],
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
+  gitlabConfigInvalid: ['gitlab', 'The GitLab Source configuration is invalid.'],
+  gitlabCliMissing: ['gitlab', 'The GitLab CLI (glab) could not be run.'],
+  gitlabCliTooOld: ['gitlab', 'glab {version} is too old; dsh-superagent requires glab {minimum} or newer.'],
+  gitlabAuthFailed: ['gitlab', 'glab is not authenticated to {host}; authenticate in this project’s GLAB_CONFIG_DIR with `glab auth login --hostname {host}`.'],
+  gitlabTlsVerificationDisabled: ['gitlab', 'TLS verification is disabled in glab configuration for {host}; enable certificate verification and configure a trusted CA instead.'],
+  gitlabConfigDirShared: ['gitlab', 'GitLab projects {project} and {otherProject} resolve to the same glab configuration directory; assign separate GLAB_CONFIG_DIR paths.'],
+  gitlabProjectRepeated: ['gitlab', 'GitLab project {project} on {host} is configured more than once ({otherSource}); keep one ProjectSource so it has one poller and one credential identity.'],
+  gitlabUserUnreported: ['gitlab', 'GitLab host {host} did not return the authenticated user identity.'],
+  gitlabConnectionFailed: ['gitlab', 'Could not reach GitLab host {host}; check host routing, VPN, DNS, proxy, and trusted CA settings. TLS verification remains enabled.'],
+  gitlabProjectUnreadable: ['gitlab', '@{account} cannot read GitLab project {project} on {host}.'],
+  gitlabProjectUnreported: ['gitlab', 'GitLab host {host} did not return project access details for {project}.'],
+  gitlabProjectReadOnly: ['gitlab', '@{account} needs Developer access or higher to push to {project} on {host}.'],
   feishuCliFailed: ['feishu', 'The bot lark-cli does not work.'],
   feishuNoApp: ['feishu', 'auth status of the bot lark-cli did not report the app.'],
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],

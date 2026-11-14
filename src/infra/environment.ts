@@ -10,17 +10,21 @@ import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh
 import type { Deployment } from '../deployment.ts'
 import { SetupError } from '../setup.ts'
 import { CliError } from './commands.ts'
+import type { ResolvedProject } from '../project-source.ts'
 
 const MARKER = '# Written by dsh-superagent on every start; edits are lost.'
 /** Markers of files written under the project's earlier names (`dsh-tag`, `dsh-go`, `dsh-freelancer`), which `dsh-superagent` owns and replaces too. */
 const LEGACY_MARKERS = ['dsh-tag', 'dsh-go', 'dsh-freelancer'].map(name => `# Written by ${name} on every start; edits are lost.`)
 /** Commands workers need, which `blockedCommands` cannot block: the shims and git. */
-export const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'lark-cli']
+export const WORKER_COMMANDS: readonly string[] = ['gh', 'glab', 'git', 'lark-cli']
 export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bin')
-export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
+export const workerGitConfig = (stateDir: string, source?: string): string => source ? join(stateDir, 'project-environments', source, 'gitconfig') : join(stateDir, 'worker-gitconfig')
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 const gitQuote = (value: string): string => `"${value.replace(/[\\"]/g, char => `\\${char}`)}"`
-export const credentialHelper = (cli: string): string => `!${shellQuote(cli)} auth git-credential`
+export const CREDENTIAL_ENVIRONMENT = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN', 'GLAB_TOKEN', 'OAUTH_TOKEN', 'CI_JOB_TOKEN'] as const
+export const TLS_BYPASS_ENVIRONMENT = ['GIT_SSL_NO_VERIFY', 'NODE_TLS_REJECT_UNAUTHORIZED', 'GITLAB_SKIP_TLS_VERIFY', 'GLAB_SKIP_TLS_VERIFY', 'SKIP_TLS_VERIFY'] as const
+const cleanCredentials = `env ${[...CREDENTIAL_ENVIRONMENT, ...TLS_BYPASS_ENVIRONMENT].map(key => `-u ${key}`).join(' ')}`
+export const credentialHelper = (cli: string): string => `!${cleanCredentials} ${shellQuote(cli)} auth git-credential`
 
 export function sameDirectory(a: string, b: string): boolean {
   const real = (path: string): string => { try { return realpathSync(path) } catch { return resolve(path) } }
@@ -44,7 +48,8 @@ export const GIT_LOCATION: readonly string[] = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT
  */
 export function agentVariables(stateDir: string): Record<string, string | undefined> {
   return {
-    GH_TOKEN: undefined, GITHUB_TOKEN: undefined,
+    ...Object.fromEntries(CREDENTIAL_ENVIRONMENT.map(key => [key, undefined])),
+    ...Object.fromEntries(TLS_BYPASS_ENVIRONMENT.map(key => [key, undefined])),
     // A worker's git finds the repository from its directory, never from the host's environment.
     ...Object.fromEntries(GIT_LOCATION.map(name => [name, undefined])),
     GIT_CONFIG_GLOBAL: workerGitConfig(stateDir), GIT_CONFIG_NOSYSTEM: '1',
@@ -76,7 +81,7 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu'>, blockedCommands: readonly string[]): Promise<void> {
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu' | 'projects'>, blockedCommands: readonly string[]): Promise<void> {
   const { stateDir, repository, github, feishu } = deployment
   const dir = workerBin(stateDir)
   await mkdir(dir, { recursive: true })
@@ -91,28 +96,50 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     kept.add(name)
   }
   const withoutShims = [
+    `unset ${[...CREDENTIAL_ENVIRONMENT, ...TLS_BYPASS_ENVIRONMENT].join(' ')}`,
     `self=${shellQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
     'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
     'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
   ].join('\n')
   const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
+  const projects = Object.values(deployment.projects ?? {})
+  const projectEnvironment = (project: ResolvedProject): string => Object.entries({ ...project.environment,
+    ...(project.configDir ? { [project.provider === 'gitlab' ? 'GLAB_CONFIG_DIR' : 'GH_CONFIG_DIR']: project.configDir } : {}) })
+    .map(([key, value]) => `${key}=${shellQuote(value)}; export ${key}`).join('\n')
+  const projectShim = (provider: 'github' | 'gitlab'): string => {
+    const choices = projects.filter(project => project.provider === provider)
+    const fallback = choices.find(project => project.id === provider)
+    const tlsCheck = (project: ResolvedProject) => provider === 'gitlab'
+      ? `if [ "$( ${shellQuote(project.cli)} config get skip_tls_verify --host ${shellQuote(project.host)} 2>/dev/null )" = true ] || [ "$( ${shellQuote(project.cli)} config get skip_tls_verify --host ${shellQuote(project.host)} 2>/dev/null )" = 1 ]; then echo 'TLS 验证已关闭；请配置受信任的 CA。' >&2; exit 1; fi\n`
+      : ''
+    return `${withoutShims}\ncase "\${DSH_SUPERAGENT_SOURCE:-}" in\n${choices.map(project => `${shellQuote(project.id)})\n${projectEnvironment(project)}\n${tlsCheck(project)}exec ${shellQuote(project.cli)} "$@"\n;;`).join('\n')}\n${fallback ? `'')\n${projectEnvironment(fallback)}\n${tlsCheck(fallback)}exec ${shellQuote(fallback.cli)} "$@"\n;;\n` : ''}*)\n${fail(`当前工单未绑定可用的 ${provider} ProjectSource`)}\n;;\nesac`
+  }
+  await shim('gh', deployment.projects ? projectShim('github') : run(github.cli))
+  if (projects.some(project => project.provider === 'gitlab')) await shim('glab', projectShim('gitlab'))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
     await shim(name, fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
-  await own(workerGitConfig(stateDir), [
+  const configuration = (host: string, helper?: string): string => [
     MARKER,
     // Make git refuse to commit without an explicit identity set by the worker instead of guessing from the operator's OS user.
     '[user]', '\tuseConfigOnly = true',
     '[credential]', '\thelper =',
-    '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
-    '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
+    ...helper ? [`[credential "https://${host}"]`, `\thelper = ${gitQuote(helper)}`] : [],
+    `[url "https://${host}/"]`, `\tinsteadOf = git@${host}:`, `\tinsteadOf = ssh://git@${host}/`,
     // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
     '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
-  ].join('\n') + '\n')
+  ].join('\n') + '\n'
+  await own(workerGitConfig(stateDir), configuration('github.com', !deployment.projects || deployment.projects.github ? credentialHelper(github.cli) : undefined))
+  for (const project of projects) {
+    const path = workerGitConfig(stateDir, project.id)
+    await mkdir(join(stateDir, 'project-environments', project.id), { recursive: true, mode: 0o700 })
+    const variables = { ...project.environment, ...(project.configDir ? { [project.provider === 'gitlab' ? 'GLAB_CONFIG_DIR' : 'GH_CONFIG_DIR']: project.configDir } : {}) }
+    const helper = `!${cleanCredentials} ${Object.entries(variables).map(([key, value]) => shellQuote(`${key}=${value}`)).join(' ')} ${shellQuote(project.cli)} auth git-credential`
+    await own(path, configuration(project.host, helper), 0o600)
+  }
 }
 
 /** Applies environment overrides and prepends worker shims to `process.env.PATH`, returning a restore callback. */
@@ -131,13 +158,22 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
   const read = (reader: SubprocessOutputReader | undefined): string => reader?.readFrom(0).text ?? ''
   if (exitCode === 0) return read(handle.collected.stdout)
   const ended = exitCode === null ? 'was stopped before it finished' : `exited with ${exitCode}`
-  throw new CliError(read(handle.collected.stderr).trim() || `${argv.join(' ')} ${ended}`, undefined, exitCode ?? undefined)
+  throw new CliError(read(handle.collected.stderr).trim() || `Worker command ${ended}`, undefined, exitCode ?? undefined)
 }
 
 /** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
-export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir' | 'projects'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
   const { github, stateDir } = deployment
   // `-z` separates fields with NUL and never quotes paths.
+  if (deployment.projects && !deployment.projects.github) {
+    for (const project of Object.values(deployment.projects)) {
+      const file = workerGitConfig(stateDir, project.id)
+      const output = await runAsWorker(subprocess, ['git', 'config', '--show-origin', '--get-all', `credential.https://${project.host}.helper`], stateDir,
+        AbortSignal.any([signal, AbortSignal.timeout(60_000)]), { GIT_CONFIG_GLOBAL: file })
+      if (!output.startsWith(`file:${file}\t`) || !output.includes('auth git-credential')) throw new SetupError('gitTooOld')
+    }
+    return
+  }
   const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
   if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
 }

@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -18,6 +18,7 @@ import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
+import { ticketShell } from '../infra/ticket-shell.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
 
 /** Host dependencies used by `Sessions`. */
@@ -265,6 +266,7 @@ export class Sessions {
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
+      this.bindShell(agent, ticket!.id, binding)
     }
   }
   /**
@@ -308,7 +310,25 @@ export class Sessions {
     }
     const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
     if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    const binding: SessionBinding = { disposers: this.workOnly(agent, ticketId), subagent: true }
+    this.bindings.set(agent, binding)
+    this.bindShell(agent, ticketId, binding)
+  }
+  private bindShell(agent: Agent, ticketId: string, binding: SessionBinding): void {
+    const current = this.host.store.tickets.get(ticketId)
+    if (!current) return
+    const variables = this.host.environment(current)
+    const gitConfig = variables.find(variable => variable.key === 'GIT_CONFIG_GLOBAL')?.value
+    if (!gitConfig || !variables.some(variable => variable.key === 'DSH_SUPERAGENT_SOURCE')) return
+    for (const name of ['bash', 'pwsh']) {
+      const definition = agent.ctx.tools.get(name, agent)
+      if (!definition) continue
+      binding.disposers.push(agent.ctx.tools.register(ticketShell(definition, () => {
+        const ticket = this.host.store.tickets.get(ticketId)
+        if (!ticket || !liveTicket(ticket)) throw new Error('Ticket ended; shell execution refused')
+        return Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
+      }, join(dirname(gitConfig), 'shell-environments'))))
+    }
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {
@@ -317,7 +337,7 @@ export class Sessions {
     previous?.dispose()
     const disposers: (() => void)[] = []
     for (const [name, content] of this.host.prompts.skills(version.config)) {
-      const bundled = name === 'feishu' || name === 'github' ? bundledSkills[name] : undefined
+      const bundled = Object.hasOwn(bundledSkills, name) ? bundledSkills[name as keyof typeof bundledSkills] : undefined
       const body = version.config.skills[name] ?? ''
       const description = bundled?.description ?? (body.replace(/\s+/g, ' ').slice(0, 120) || 'Custom dsh-superagent operational skill.')
       disposers.push(scope.skills.register({ name: `${SKILL_PREFIX}${name}`, description, content, source: 'runtime',

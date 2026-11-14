@@ -11,6 +11,8 @@ export interface OutboxHost {
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
+  /** 测试通道捕获；返回 true 后只记录本地交付，不调用外部 Provider。 */
+  capture?(message: OutboundMessage): boolean
   paused(): boolean
 }
 
@@ -40,6 +42,10 @@ export class Outbox implements OutboxPort {
     const { store, sources, commands } = this.host
     const receipt = store.receipts.get(id)
     if (receipt?.status !== 'pending') return
+    if (receipt.channel.source === 'local-reporter') {
+      if (!this.host.capture?.(receipt)) { store.receipts.settle(receipt, 'channelGone'); return }
+      store.receipts.settle(receipt, 'sent'); return
+    }
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')

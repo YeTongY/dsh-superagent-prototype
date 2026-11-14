@@ -296,6 +296,7 @@ export class Evals extends EnginePart {
         ...audit })
       if (evaluation.strength !== 'explicit') return this.finish(thread, evaluation, { kind: 'ignore',
         reason: [{ code: 'stopNotExplicit' }], ...audit })
+      this.assertProject(ticket, this.repo.triggers.get(evaluation.primary ?? evaluation.triggerIds[0] ?? '') ?? thread.ref)
       const decision = this.finish(thread, evaluation, { kind: 'stop', reason: reasonOf(outcome.reason), ticketId: ticket.id, ...audit })
       this.tickets.end(ticket.id, 'human', 'stopped', this.now(), typeof outcome.reason === 'string' ? outcome.reason : undefined)
       return decision

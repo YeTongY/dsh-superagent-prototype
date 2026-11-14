@@ -8,6 +8,7 @@ import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
+import { projectSourceId } from '../src/project-source.ts'
 
 let h: Host
 beforeEach(async () => { h = await startRuntime() })
@@ -15,6 +16,29 @@ afterEach(async () => { await h.stop() })
 const words = (count: number) => Array.from({ length: count }, () => 'word').join(' ')
 const read = (resource: string, page: { offset?: number; limit?: number } = {}) =>
   h.runTool(h.runtime.masterId, 'orchestrator_read', { resource, ...page })
+
+it('routes project resources to their repository and refuses a worker switching projects', async () => {
+  const { ticket } = await h.acceptedTicket({ id: 'project-request', source: 'github', threads: [{ source: 'github', id: '1' }],
+    actor: { source: 'github', id: 'alice' }, human: true, addressed: 'mention', at: '2026-11-14T00:00:00Z',
+    text: '@agent-bot fix this', meta: { kind: 'issue', number: 1, isPr: false } })
+  const deployment = h.runtime.deployment
+  const other = projectSourceId('github', 'github.com', 'acme/second')
+  deployment.projects![other] = { ...deployment.projects!.github!, id: other, project: 'acme/second' }
+  const repositories: string[] = []
+  vi.spyOn(Commands.prototype, 'gh').mockImplementation(async function (this: Commands) {
+    repositories.push(this.repository)
+    return Array.from({ length: 20 }, (_, index) => ({ id: index + 1, body: 'comment', user: { login: 'bob' },
+      html_url: `https://github.com/${this.repository}/issues/1#issuecomment-${index + 1}`, created_at: '2026-11-14T00:00:00Z' }))
+  })
+  const first = await read(`project/${other}/github/issues/1/comments/1`, { limit: 8000 })
+  expect(JSON.parse(first.text as string).next_resource).toBe(`project/${other}/github/issues/1/comments/2`)
+  await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: 'github/issues/1/comments/1' })
+  expect(repositories).toEqual(['acme/second', 'acme/widgets'])
+  await expect(h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `project/${other}/github/issues/1/comments/1` })).rejects.toThrow('does not belong')
+  await expect(read('github/issues/1/comments/1')).rejects.toThrow('Select a project explicitly')
+  await expect(read('project/feishu/github/issues/1/comments/1')).rejects.toThrow('has not completed setup')
+  expect(repositories).toHaveLength(2)
+})
 
 it('reads the lists, a ticket, a decision, the settings, the prompts and the models as resources', async () => {
   const { ticket, trigger } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))

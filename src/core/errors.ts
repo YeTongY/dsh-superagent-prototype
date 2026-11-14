@@ -1,5 +1,6 @@
 /** User-facing error codes mapped to their category ('missing' or 'refused') and English message template. */
 export const USER_ERRORS = {
+  crossProject: ['refused', 'Ticket {ticket} belongs to project {project}; a message or thread from {target} cannot be used'],
   unknownTicket: ['missing', 'Unknown ticket'],
   unknownProblem: ['missing', 'Unavailable Eval not found'],
   unknownTrigger: ['missing', 'Unknown trigger'],
