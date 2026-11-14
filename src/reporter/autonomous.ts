@@ -47,7 +47,7 @@ export interface ReporterAutonomousRunView {
   status: ReporterAutonomousRunStatus
   started_at: string
   updated_at: string
-  model: { provider: string; model: string; reasoningEffort: 'xhigh' }
+  model?: { provider: string; model: string; reasoningEffort?: string }
   summary?: string
   full_report?: string
   error_code?: string
@@ -75,7 +75,7 @@ export interface ReporterAutonomousHost {
   resolveProject(id: string): { id: string; provider: string; host: string; project: string } | undefined
   allowedActors(id: string): string[]
   resolveTicket(id: string): { id: string; projectSourceId: string; directory: string } | undefined
-  ensureSession(sessionId: string, workspace: string, title: string): Promise<{ provider: string; model: string }>
+  ensureSession(sessionId: string, workspace: string, title: string): Promise<{ provider: string; model: string; reasoningEffort?: string }>
   promptSession(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer', authorize?: () => void): Promise<void>
   cancelSession(sessionId: string): Promise<void>
   sessionStatus(sessionId: string): 'running' | 'idle' | 'missing'
@@ -139,7 +139,7 @@ export class ReporterAutonomousRuns {
     const at = this.now()
     const view: ReporterAutonomousRunView = { id, session_id: sessionId, goal: request.goal, project_source_id: request.project_source_id,
       ...(request.ticket_id ? { ticket_id: request.ticket_id } : {}), mode: request.mode, status: 'running', started_at: at, updated_at: at,
-      model: { provider: 'dsh-default', model: 'dsh-default', reasoningEffort: 'xhigh' } }
+    }
     const record: ReporterAutonomousRunRecord = { request, digest: requestDigest, workspace, ...(scenarioId ? { scenario_id: scenarioId } : {}), view }
     this.save(record)
     try { await this.wake(record) }
@@ -242,7 +242,7 @@ export class ReporterAutonomousRuns {
 
   private async wake(record: ReporterAutonomousRunRecord): Promise<void> {
     const model = await this.host.ensureSession(record.view.session_id, record.workspace, `Reporter：${record.request.goal.slice(0, 100)}`)
-    this.update(record, { model: { ...model, reasoningEffort: 'xhigh' } })
+    this.update(record, { model })
     await this.host.promptSession(record.view.session_id, `reporter-start:${record.view.id}`, this.initialPrompt(record), 'queue')
   }
 

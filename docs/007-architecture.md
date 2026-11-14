@@ -427,6 +427,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | `tests/reporter.spec.ts` | 本地 Reporter 协议、持久化、隐藏 Oracle、脚本与回放 |
 | `tests/reporter-runtime.spec.ts` | 真实 Runtime/Engine 的本地闭环、GitHub/GitLab 同号项目和 MR 报告路由 |
 | `tests/reporter-autonomous.spec.ts` | DSH Session 身份、幂等恢复、执行工作区绑定、报告投影与取消 |
+| `tests/reporter-model-selection.spec.ts` | 按 DSH 精确模型路由能力选择并验证 Reporter 推理等级 |
 | `tests/reporter-browser.spec.ts` | loopback 浏览器登录、同源限制、语义动作和凭据隔离 |
 | `tests/panel-overview.spec.tsx` | 概览与自主 Reporter 状态、摘要/完整报告及 DSH Session 导航 |
 | `tests/gitlab-vpn-e2e.spec.ts` | 显式门控的真实 glab 认证、Issue/MR 幂等评论、MR 生命周期与资源清理；默认跳过 |

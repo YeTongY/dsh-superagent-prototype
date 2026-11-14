@@ -26,7 +26,7 @@ function harness() {
     allowedActors: () => ['alice'],
     resolveTicket: id => id === 'ticket-1' ? { id, projectSourceId: 'github', directory: '/work/ticket-1' }
       : id === 'ended-ticket' ? { id, projectSourceId: 'github', directory: '/work/ended' } : undefined,
-    ensureSession: vi.fn(async () => ({ provider: 'deepseek', model: 'deepseek-chat' })),
+    ensureSession: vi.fn(async () => ({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })),
     promptSession: vi.fn(async () => {}),
     cancelSession: vi.fn(async sessionId => { sessionStates.set(sessionId, 'idle') }),
     sessionStatus: sessionId => sessionStates.get(sessionId) ?? 'idle',
@@ -45,7 +45,7 @@ describe('Reporter DSH Session projection', () => {
   it('creates one native DSH Session, preserves its identity on retry, and uses the worker workspace when bound', async () => {
     const runs = new ReporterAutonomousRuns(h.host)
     const first = await runs.start(request({ ticket_id: 'ticket-1' }))
-    expect(first).toMatchObject({ session_id: `reporter-${first.id}`, status: 'waiting', model: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'xhigh' } })
+    expect(first).toMatchObject({ session_id: `reporter-${first.id}`, status: 'waiting', model: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' } })
     expect(h.host.ensureSession).toHaveBeenCalledWith(first.session_id, '/work/ticket-1', expect.stringContaining('Reporter：'))
     expect(h.host.promptSession).toHaveBeenCalledWith(first.session_id, `reporter-start:${first.id}`, expect.stringContaining('自由文本完整报告'), 'queue')
     expect(runs.contextForSession(first.session_id)).toMatchObject({ request: { ticket_id: 'ticket-1' }, scenario_id: expect.stringMatching(/^scenario-/) })
@@ -118,6 +118,13 @@ describe('Reporter DSH Session projection', () => {
     expect(cancelled.status).toBe('cancelled')
   })
 
+  it('does not project a model selection when native DSH initialization fails before selecting one', async () => {
+    h.host.ensureSession = vi.fn(async () => { throw new Error('model route rejected the requested reasoning effort') })
+    const runs = new ReporterAutonomousRuns(h.host)
+    await expect(runs.start(request())).rejects.toMatchObject({ code: 'reporter_session_unavailable' })
+    expect(runs.list()[0]).not.toHaveProperty('model')
+  })
+
   it('preserves a report committed while native DSH cancellation is draining', async () => {
     let finishCancellation!: () => void
     let cancellationStarted!: () => void
@@ -162,7 +169,7 @@ describe('Reporter DSH Session projection', () => {
     const first = new ReporterAutonomousRuns(h.host)
     const active = await first.start(request())
     await first.submitReport(active.session_id, '摘要', '完整报告')
-    const restoredHost = { ...h.host, ensureSession: vi.fn(async () => ({ provider: 'deepseek', model: 'deepseek-chat' })),
+    const restoredHost = { ...h.host, ensureSession: vi.fn(async () => ({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })),
       promptSession: vi.fn(async () => {}) }
     const restored = new ReporterAutonomousRuns(restoredHost)
     await restored.resume()

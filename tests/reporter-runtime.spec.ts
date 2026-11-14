@@ -78,6 +78,7 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   const run = await runtime.reporterRuns!.start({ idempotency_key: 'native-session-roundtrip', goal: '确认产品行为并交流发现',
     project_source_id: 'github', mode: 'simulation', permissions: { simulation: true } })
   expect(host.agents.has(run.session_id)).toBe(true)
+  expect(run.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })
   expect(host.restrictions.get(run.session_id)).toEqual([{ allow: [] }])
   const reporterTools = [...host.tools.get(run.session_id)!.keys()]
   expect(reporterTools).toEqual(expect.arrayContaining(['reporter_simulate_user_action', 'reporter_candidate', 'reporter_submit_report']))
@@ -113,6 +114,22 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggersBefore)
   expect(runtime.store.tickets.list()).toHaveLength(ticketsBefore)
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get()?.count)).toBe(receiptsBefore)
+})
+
+it('projects a restored Reporter Session model from its actual DSH request header', async () => {
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  host = await startRuntime()
+  const run = await host.runtime.reporterRuns!.start({ idempotency_key: 'existing-model-route', goal: '恢复 Reporter 路由',
+    project_source_id: 'github', mode: 'simulation', permissions: { simulation: true } })
+  const agent = host.agents.get(run.session_id)! as unknown as { session: { snapshotEvents(): { type: string }[]; append(type: string, data: unknown): unknown } }
+  const events = agent.session.snapshotEvents()
+  events.splice(0, events.length, ...events.filter(event => event.type !== 'model/selection'))
+  agent.session.append('request/header', { header: { config: { provider: 'persisted-provider', model: 'persisted-model', reasoningEffort: 'medium' } }, reason: 'initial' })
+  host.controller.modelCatalog.mockRejectedValueOnce(new Error('current DSH default model unavailable'))
+
+  await expect(host.runtime.sessions.ensureReporter(run.session_id, host.directory, 'Reporter with an existing DSH route'))
+    .resolves.toEqual({ provider: 'persisted-provider', model: 'persisted-model', reasoningEffort: 'medium' })
 })
 
 it('routes a listed user stop action on an active thread through the real Engine', async () => {

@@ -1,6 +1,7 @@
 /** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator and worker DSH sessions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -19,6 +20,7 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import { ticketShell } from '../infra/ticket-shell.ts'
+import type { RoleModel } from '../policy.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
 import type { ReporterSessionContext } from '../reporter/autonomous.ts'
 
@@ -63,6 +65,28 @@ interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: 
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router', REPORTER_PRESET = 'dsh-superagent-reporter'
+
+/** Prefer xhigh only when the active DSH model route advertises it; otherwise keep that route's default effort. */
+export function selectReporterModel(catalog: Pick<ModelCatalog, 'default' | 'groups'>): RoleModel {
+  const selected = catalog.default
+  if (!selected.provider || !selected.model) throw new Error('Reporter DSH Session requires DSH default model')
+  const model = catalog.groups.find(group => group.id === selected.provider)?.models.find(item => item.id === selected.model)
+  const efforts = model?.reasoning?.efforts.map(effort => effort.id)
+  const reasoningEffort = efforts?.includes('xhigh') ? 'xhigh'
+    : selected.reasoningEffort && efforts?.includes(selected.reasoningEffort) ? selected.reasoningEffort
+      : model?.reasoning?.defaultEffort && efforts?.includes(model.reasoning.defaultEffort) ? model.reasoning.defaultEffort
+        : undefined
+  return { provider: selected.provider, model: selected.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
+}
+
+function reporterSessionModel(agent: Agent): RoleModel | undefined {
+  const selection = agent.session.snapshotEvents().reduce<RoleModel | undefined>((current, event) =>
+    event.type === 'model/selection' ? event.data : current, undefined)
+  if (selection?.provider && selection.model) return selection
+  const actual = agent.session.requestHeader()?.config
+  return actual?.provider && actual.model ? { provider: actual.provider, model: actual.model,
+    ...(actual.reasoningEffort ? { reasoningEffort: actual.reasoningEffort } : {}) } : undefined
+}
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
@@ -153,7 +177,21 @@ export class Sessions {
     })
   }
   /** Resolves or creates a persistent DSH session and applies its role-specific model, prompt, tools and workspace. */
-  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker' | 'reporter'): Promise<Agent> {
+  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
+    return this.ensureWithModel(id, cwd, title, role)
+  }
+  /** Creates or resumes a Reporter Session with a DSH-supported selection and returns that exact selection for its run view. */
+  async ensureReporter(id: string, cwd: string, title: string): Promise<RoleModel> {
+    const resolved = await this.ctx.sessionController.resolveAgent(id as SessionId)
+    if ('error' in resolved && resolved.error.code !== 'session/not-found') throw resolved.error
+    const requested = ('error' in resolved ? undefined : reporterSessionModel(resolved.agent))
+      ?? selectReporterModel(await this.ctx.sessionController.modelCatalog())
+    const agent = await this.ensureWithModel(id, cwd, title, 'reporter', requested)
+    const selection = reporterSessionModel(agent)
+    if (selection) return selection
+    throw new Error('Reporter DSH Session has no persisted model selection')
+  }
+  private async ensureWithModel(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker' | 'reporter', reporterModel?: RoleModel): Promise<Agent> {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
@@ -165,17 +203,13 @@ export class Sessions {
     }
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
-    const model = role === 'orchestrator' ? settings.eval.model : role === 'worker' ? settings.executor.model : await this.reporterModel()
+    const model = role === 'orchestrator' ? settings.eval.model : role === 'worker' ? settings.executor.model : reporterModel ?? null
+    if (role === 'reporter' && !model) throw new Error('Reporter DSH model selection is unavailable')
     await initializeRoleModel(ctx, result.agent, model)
     await this.decorate(result.agent)
     if (role !== 'reporter') ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
-  }
-  private async reporterModel() {
-    const selected = (await this.ctx.sessionController.modelCatalog()).default
-    if (!selected.provider || !selected.model) throw new Error('Reporter DSH Session requires DSH default model')
-    return { provider: selected.provider, model: selected.model, reasoningEffort: 'xhigh' }
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {

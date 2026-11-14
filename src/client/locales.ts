@@ -149,6 +149,7 @@ const TEXT = {
   'reporter.modeLabel': ['方式', 'Mode'],
   'reporter.projectLabel': ['项目', 'Project'],
   'reporter.modelLabel': ['模型', 'Model'],
+  'reporter.modelPending': ['尚未完成模型选择', 'Model selection pending'],
   'reporter.ticketId': ['执行工单', 'Executor ticket'],
   'reporter.summary': ['报告摘要', 'Report summary'],
   'reporter.fullReport': ['完整报告', 'Full report'],

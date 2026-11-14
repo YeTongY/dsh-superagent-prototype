@@ -251,12 +251,7 @@ export class Runtime extends Service implements SourceHost {
             if (!project) return undefined
             return { id, projectSourceId: project.id, directory }
           },
-          ensureSession: async (sessionId, workspace, title) => {
-            await sessions.ensure(sessionId, workspace, title, 'reporter')
-            const selected = (await ctx.sessionController.modelCatalog()).default
-            if (!selected.provider || !selected.model) throw new Error('Reporter DSH default model is unavailable')
-            return { provider: selected.provider, model: selected.model }
-          },
+          ensureSession: (sessionId, workspace, title) => sessions.ensureReporter(sessionId, workspace, title),
           promptSession: (sessionId, requestId, text, mode, authorize) => sessions.prompt(sessionId, requestId, text, mode, authorize),
           cancelSession: async sessionId => {
             const result = await ctx.sessionController.resolveAgent(sessionId as SessionId)

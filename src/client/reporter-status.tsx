@@ -38,7 +38,9 @@ function ReporterRun({ run }: { run: ReporterAutonomousRunView }) {
       <dl className="dt-reporter-meta">
         <div><dt>{t('reporter.projectLabel')}</dt><dd className="dt-mono">{run.project_source_id}</dd></div>
         <div><dt>{t('reporter.modeLabel')}</dt><dd>{t(modeKeys[run.mode])}</dd></div>
-        <div><dt>{t('reporter.modelLabel')}</dt><dd>{run.model.provider}/{run.model.model} · {t('reporter.reasoning', { effort: run.model.reasoningEffort })}</dd></div>
+        <div><dt>{t('reporter.modelLabel')}</dt><dd>{run.model
+          ? <>{run.model.provider}/{run.model.model}{run.model.reasoningEffort ? <> · {t('reporter.reasoning', { effort: run.model.reasoningEffort })}</> : null}</>
+          : t('reporter.modelPending')}</dd></div>
         {run.ticket_id && <div><dt>{t('reporter.ticketId')}</dt><dd className="dt-mono">{run.ticket_id}</dd></div>}
       </dl>
 

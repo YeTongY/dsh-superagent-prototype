@@ -143,6 +143,13 @@ const autonomousRun = (id: string, status: ReporterAutonomousRunView['status']):
   model: { provider: 'host', model: 'reporter-model', reasoningEffort: 'xhigh' },
 })
 
+it('shows that a Reporter model is still being selected instead of displaying a placeholder route', async () => {
+  server.reporter = { enabled: true, runs: [{ ...autonomousRun('run-unselected', 'running'), model: undefined }] }
+  await mount()
+  expect(text()).toContain(zh['reporter.modelPending'])
+  expect(text()).not.toContain('dsh-default')
+})
+
 it('shows an enabled idle Reporter distinctly from its active DSH Session', async () => {
   server.reporter = { enabled: true, runs: [] }
   await mount()

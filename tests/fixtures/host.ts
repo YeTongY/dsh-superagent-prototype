@@ -171,7 +171,9 @@ export async function startRuntime(seed?: (store: Store) => void) {
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const controller = {
-    modelCatalog: vi.fn(async () => ({ default: { provider: 'deepseek', model: 'deepseek-chat' } })),
+    modelCatalog: vi.fn(async () => ({ default: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' },
+      routableProviders: ['deepseek'], groups: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat',
+        reasoning: { efforts: ['low', 'medium', 'high'].map(id => ({ id, name: id })), defaultEffort: 'high' } }] }], failures: [] })),
     create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
@@ -219,7 +221,13 @@ export async function startRuntime(seed?: (store: Store) => void) {
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const modelEvents: { type: string; data: unknown }[] = []
+      const session = { id: sessionId, snapshotEvents: () => modelEvents,
+        requestHeader: () => {
+          const data = [...modelEvents].reverse().find(event => event.type === 'request/header')?.data
+          return data && typeof data === 'object' && 'header' in data ? data.header : undefined
+        },
+        append: vi.fn((type: string, data: unknown) => { const event = { type, data }; modelEvents.push(event); return event }) }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.

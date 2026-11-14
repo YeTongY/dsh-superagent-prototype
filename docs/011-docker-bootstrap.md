@@ -100,7 +100,7 @@ Reporter 默认关闭。确认自己通过 loopback 或 SSH 隧道访问后，�
     chmod 600 docker/runtime.env
     docker compose up -d
 
-通过 POST /orchestrator/reporter/scenarios 注册以首个 GitHub 项目 ID 为 project_source_id 的场景，再用 POST /orchestrator/reporter/events 提交动作；细节见[本地 Reporter 文档](010-local-reporter.md)。Reporter 动作走真实 Runtime/Engine，场景回复由本地 Sink 捕获。固定脚本仍可通过现有场景接口运行。自主测试使用 `POST /orchestrator/reporter/runs` 提交产品目标、项目和权限，在 DSH 中创建或恢复独立 Reporter Session，推理等级为 `xhigh`。启用 Reporter 不会自动发起测试；DSH Runtime 重启后复用同一 Session 与历史。Reporter 不设置专用超时提醒或模型预算停止器，取消由 DSH 原生 Session 生命周期处理。管理页展示摘要、完整报告和打开 Reporter Session 的入口。
+通过 POST /orchestrator/reporter/scenarios 注册以首个 GitHub 项目 ID 为 project_source_id 的场景，再用 POST /orchestrator/reporter/events 提交动作；细节见[本地 Reporter 文档](010-local-reporter.md)。Reporter 动作走真实 Runtime/Engine，场景回复由本地 Sink 捕获。固定脚本仍可通过现有场景接口运行。自主测试使用 `POST /orchestrator/reporter/runs` 提交产品目标、项目和权限，在 DSH 中创建或恢复独立 Reporter Session。Reporter 优先使用 `xhigh`；仅在 DSH 当前默认精确模型路由声明支持时传入，否则沿用该路由支持的默认等级，并在管理页显示 Session 实际选择。启用 Reporter 不会自动发起测试；DSH Runtime 重启后复用同一 Session 与历史。Reporter 不设置专用超时提醒或模型预算停止器，取消由 DSH 原生 Session 生命周期处理。管理页展示摘要、完整报告和打开 Reporter Session 的入口。
 
 检查行为和配置后移除 Reporter 开关与 Token 并重启。platform_pass 在本地 Reporter 中保持 null。真实 GitHub 评论交付、git push、分支保护和模型驱动自举是不同的验收步骤；不要把容器健康或本地 Reporter 通过当成它们已经通过。
 
