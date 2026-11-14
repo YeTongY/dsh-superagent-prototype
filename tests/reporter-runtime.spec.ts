@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { Commands } from '../src/infra/commands.ts'
 import { projectSourceId } from '../src/project-source.ts'
 import { gitlabKind } from '../src/sources/gitlab.ts'
-import { startRuntime, type Host } from './fixtures/host.ts'
+import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { createRuntimeReporterBrowserFactory } from '../src/app/runtime.ts'
 import { inject as runtimeInject } from '../src/index.ts'
 
@@ -65,6 +65,21 @@ it('keeps Reporter off in ordinary runtime configuration', async () => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '')
   host = await startRuntime()
   expect(host.runtime.reporter).toBeUndefined()
+})
+
+it('requires read-only inspection of the bound executor code using native DSH file tools', async () => {
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  host = await startRuntime()
+  const { ticket } = await host.acceptedTicket(feishu('reporter-code-reference', '@agent-bot review the settings flow'))
+  const run = await host.runtime.reporterRuns!.start({ idempotency_key: 'reporter-code-reference', goal: '以普通项目维护者视角核对设置操作是否符合预期',
+    project_source_id: 'github', mode: 'real-service', permissions: { read_only_service: true }, ticket_id: ticket.id })
+
+  expect(host.restrictions.get(run.session_id)).toEqual([{ allow: ['read', 'read_image', 'glob', 'grep'] }])
+  const initialPrompt = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery => delivery.sessionId === run.session_id)?.text
+  expect(initialPrompt).toContain('先用 DSH 原生只读文件工具检查项目入口')
+  expect(initialPrompt).toContain('在完整报告中列出实际查看的文件')
+  expect(initialPrompt).toContain('真实用户可观察行为')
 })
 
 it('exchanges Reporter findings, orchestrator replies and its free-text report through native DSH Sessions', async () => {

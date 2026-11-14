@@ -259,7 +259,7 @@ export class ReporterAutonomousRuns {
       `测试目标：\n${request.goal}`,
       `目标 ProjectSource：${request.project_source_id}`,
       `权限：${JSON.stringify(request.permissions)}`,
-      request.ticket_id ? `参考执行者工单：${request.ticket_id}。当前 DSH Workspace 是该工单执行目录；只读检查实现和测试，不要修改文件。` : '',
+      request.ticket_id ? `参考执行者工单：${request.ticket_id}。当前 DSH Workspace 是该工单执行目录；请先用 DSH 原生只读文件工具检查项目入口及与目标相关的实现和测试，并在完整报告中列出实际查看的文件。源码只用于背景和交叉核对，问题判断仍须依据真实用户可观察行为；不要修改文件。` : '',
       '只能使用本 Session 提供的只读文件、仿真、服务或浏览器工具。仿真动作经过 Superagent Runtime/Engine，必须等待真实目标回复；不要伪造回复。',
       '发现值得编排者判断的问题时，调用 reporter_candidate 告知证据与疑问；编排者可能在本 Session 中追问或回应，你应读取并继续。Reporter 无权创建执行工单。',
       '完成调查时调用 reporter_submit_report，提交一段简短摘要和自由文本完整报告。不要输出 JSON，不需要遵循固定报告模板。完整对话只保存在本 DSH Session。',

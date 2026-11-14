@@ -48,6 +48,10 @@ describe('Reporter DSH Session projection', () => {
     expect(first).toMatchObject({ session_id: `reporter-${first.id}`, status: 'waiting', model: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' } })
     expect(h.host.ensureSession).toHaveBeenCalledWith(first.session_id, '/work/ticket-1', expect.stringContaining('Reporter：'))
     expect(h.host.promptSession).toHaveBeenCalledWith(first.session_id, `reporter-start:${first.id}`, expect.stringContaining('自由文本完整报告'), 'queue')
+    const initialPrompt = vi.mocked(h.host.promptSession).mock.calls[0]![2]
+    expect(initialPrompt).toContain('先用 DSH 原生只读文件工具检查项目入口')
+    expect(initialPrompt).toContain('在完整报告中列出实际查看的文件')
+    expect(initialPrompt).toContain('真实用户可观察行为')
     expect(runs.contextForSession(first.session_id)).toMatchObject({ request: { ticket_id: 'ticket-1' }, scenario_id: expect.stringMatching(/^scenario-/) })
 
     const retried = await runs.start(request({ ticket_id: 'ticket-1' }))

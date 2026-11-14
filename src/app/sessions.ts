@@ -51,7 +51,7 @@ function reporterInstructions(context: ReporterSessionContext): string {
     `运行：${view.id}；ProjectSource：${request.project_source_id}；目标：${request.goal}`,
     `授权能力：${JSON.stringify(request.permissions)}${scenarioId ? `；本地仿真场景：${scenarioId}` : ''}`,
     '只使用当前 DSH Session 提供的只读文件观察和 Reporter 工具。仿真动作必须经 LocalReporter/Runtime/Engine，等待 Superagent 的真实响应；不得伪造回复、直接修改业务状态或发布平台消息。',
-    '如果绑定了执行者工单，当前 Workspace 就是对应执行目录；只读检查实现和测试，不要修改文件。',
+    '如果绑定了执行者工单，必须使用 DSH 原生只读文件工具检查项目入口及与目标相关的实现和测试，并在完整报告中列出实际查看的文件。源码只作背景和交叉核对；是否报告问题必须依据真实用户可观察行为，不要修改文件。',
     '发现候选问题或需要补充信息时调用 reporter_candidate。Orchestrator 可以通过本 Session 回答你；Reporter 无权决定创建工单。',
     '调查完成后调用 reporter_submit_report，给出简短摘要和自由文本完整报告。无需 JSON 或固定模板。',
   ].join('\n')
