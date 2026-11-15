@@ -69,13 +69,13 @@ export function reporterTools(host: ReporterToolsHost, sessionId: string, contex
   if (request.permissions.browser) {
     tools.push(tool({
       name: 'reporter_browser_observe',
-      description: '打开受保护的本地 Superagent 管理页并读取当前页面的控件、标题、路径和错误计数。',
+      description: '打开受保护的本地 Superagent 管理页，返回控件观察和当前视口截图图像附件。只有当前 DSH 模型路由明确支持图像且附件已保存时才会附图；否则查看结果中的 screenshot 状态，并且不要声称看过截图。',
       schema: z.object({}).strict(),
       execute: async (_args, signal) => (await host.runs.browserDriver(sessionId, signal)).observe(signal),
     }))
     tools.push(tool({
       name: 'reporter_browser_act',
-      description: '在管理页执行一个受限的用户界面动作，然后返回新的真实页面观察。不能导航到任意 URL、运行脚本、提交设置或触发写操作。',
+      description: '在本地 Superagent 面板执行一个受限的真实 GUI 动作，然后返回新视口截图附件和控件观察。可用截图坐标、滚动、调整视口、精确控件操作或恢复 Superagent 面板；坐标必须来自刚收到的截图并位于可见产品内容区。不能导航到任意 URL、运行脚本、提交设置或触发写操作。',
       schema: z.object({ action: ReporterBrowserActionSchema }).strict(),
       execute: async (args, signal) => (await host.runs.browserDriver(sessionId, signal)).act(args.action, signal),
     }))

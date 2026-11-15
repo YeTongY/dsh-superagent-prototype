@@ -80,7 +80,7 @@ export interface ReporterAutonomousHost {
   cancelSession(sessionId: string): Promise<void>
   sessionStatus(sessionId: string): 'running' | 'idle' | 'missing'
   relay(requestId: string, text: string): void
-  browser?: { create(signal: AbortSignal): Promise<ReporterBrowserDriver> }
+  browser?: { create(sessionId: string, signal: AbortSignal): Promise<ReporterBrowserDriver> }
   lifetime: AbortSignal
   now?: () => string
 }
@@ -240,7 +240,7 @@ export class ReporterAutonomousRuns {
   async browserDriver(sessionId: string, signal: AbortSignal): Promise<ReporterBrowserDriver> {
     if (!this.host.browser) throw new ReporterAutonomousRunError(503, 'browser_unavailable', 'Reporter 浏览器驱动不可用')
     let driver = this.browsers.get(sessionId)
-    if (!driver) { driver = await this.host.browser.create(signal); this.browsers.set(sessionId, driver) }
+    if (!driver) { driver = await this.host.browser.create(sessionId, signal); this.browsers.set(sessionId, driver) }
     return driver
   }
 
@@ -256,14 +256,18 @@ export class ReporterAutonomousRuns {
     const request = record.request
     const capabilities = Object.entries(request.permissions).filter(([, enabled]) => enabled).map(([name]) => name)
     return [
-      '你是本地自动测试 Reporter。根据这次目标，像真实用户一样亲自理解和观察产品，并独立决定从哪里开始、采用什么调查方式、接下来要验证什么，以及何时已有足够信息。不要执行预设检查清单；不必使用每一种工具，也不必按固定顺序检查。',
+      '你是主动、挑剔的产品审查者，也要像真实用户一样亲自使用产品。尽可能寻找实现薄弱点、失败路径、界面问题和行为矛盾；页面能打开、服务健康或一条正常流程成功，都不能代替深入调查。',
+      '结合同项目源码审查与实际截图 GUI 操作来发现和核验问题。具体审查哪个区域、提出什么假设、使用哪些工具以及按什么顺序继续，由你自主判断；不要把主会话给的目标改写成固定检查清单。若截图或代码权限/能力不可用，说明缺口，并继续调查其余可用方向；没有实际看到截图图像时，不得称为完成了截图审查。',
+      '静态实现证据本身可以支持一个问题候选，不要求每个实现缺陷都先在线复现。分别说明代码证据、实际 GUI 观察/复现和仍待确认的推断，不把它们混为一谈。挑剔是认真验证疑点，不是制造缺陷。',
+      '一次候选被否定、一个页面或工具受阻、服务健康或当前没有确认缺陷，都不能据此结束整轮；关闭或标记该调查分支后，继续寻找并核验其他有价值的方向。编排者对单个候选的回复只处理该候选，除非明确要求终止整个审查。不要因为等待时长而停下。',
       `目标：\n${request.goal}`,
       `目标 ProjectSource：${request.project_source_id}`,
       `本次授权能力：${capabilities.length ? capabilities.join('、') : '无'}`,
-      request.ticket_id ? `可选参考执行工单：${request.ticket_id}。当前 DSH Workspace 指向该工单执行目录；你可以自行判断读取其中代码或测试是否有助于调查。` : '',
+      request.ticket_id ? `同项目只读源码工作区：执行工单 ${request.ticket_id}，目录已绑定到当前 DSH Workspace。主动审查实现和相关测试，根据线索扩展到关联调用路径、组件和失败处理；具体检查范围由你决定，不要只停留在单个文件表面。` : '本次未绑定同项目代码工作区；说明无法直接审查源码的限制，并继续已授权的截图 GUI 或其他调查。',
+      request.permissions.browser ? '本次已授权截图 GUI。请实际观察截图图像并像真实用户一样操作界面；仅有可访问性树或文本快照不算完成截图审查。' : '本次未授权截图 GUI，不能声称已查看截图或完成 GUI 审查；如实说明，并继续源码与其他已授权方向。',
       '只能使用本 Session 实际提供的工具和权限。不得修改文件、执行 shell、改变项目或工单状态、创建执行工单或指挥 Worker。仿真动作必须等待并依据 Superagent 的真实反馈，不得编造回复。',
-      '如果你认为某个观察值得编排者判断，或需要编排者澄清，可以把目前的证据和具体疑问通过 reporter_candidate 发给编排者；由编排者决定是否回复或派工。你也可以自行继续调查，候选不要求立即形成结论。',
-      '你认为调查已经足够时，使用 reporter_submit_report 提交简短摘要和自由文本完整报告。内容与组织方式由你决定，不需要 JSON、固定模板或预设结论；如有帮助，可以记录实际操作和依据。完整对话由当前 DSH Session 保存。',
+      '发现可信候选或需要编排者协助时，及时使用 reporter_candidate，并继续调查其他方向。编排者决定候选是否值得派工；单个候选被否决或暂不派工不代表本轮审查结束。',
+      '仅当你已尽力调查当前可用的源码和截图 GUI 方向、并且没有其他合理且可验证的疑点可继续时，才提交最终报告。说明调查了什么、哪些分支被证实/排除/受阻以及依据；报告长度和组织由你决定，不需要 JSON、固定模板、最少发现数或文件清单。完整对话由当前 DSH Session 保存。',
     ].filter(Boolean).join('\n\n')
   }
 

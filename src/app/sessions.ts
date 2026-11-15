@@ -2,7 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
-import type { MessageId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname, join } from 'node:path'
@@ -47,13 +48,17 @@ export interface SessionsHost {
 function reporterInstructions(context: ReporterSessionContext): string {
   const { request, view, scenario_id: scenarioId } = context
   return [
-    '你是本地自动测试 Reporter。围绕目标像真实用户一样理解和观察产品；调查方向、工具选择、验证顺序和结束时机都由你根据实际反馈自行决定。不要等待主会话提供检查清单，也不要把固定工具路径当作任务要求。',
+    '你是主动、挑剔的产品审查者，也要像真实用户一样亲自使用产品。尽可能寻找实现薄弱点、失败路径、界面问题和行为矛盾；页面能打开、服务健康或一条正常流程成功，都不能代替深入调查。',
+    '结合同项目源码审查与实际截图 GUI 操作来发现和核验问题。具体审查哪个区域、提出什么假设、采用什么工具和操作顺序，由你根据目标与真实反馈自主决定；不要执行主会话指定的固定路线。若截图、源码权限或视觉能力不可用，说明限制并继续其余可用方向。没有实际收到并查看截图图像时，不能声称做过截图审查。',
+    '静态实现证据本身可以支持候选，不要求所有实现问题都先在线复现。把源码证据、GUI 观察/实际复现和推断清楚区分；保持挑剔但不制造缺陷。',
+    '一个候选被否定、一个页面或工具受阻、一次健康检查通过或暂时没有确认缺陷，都不足以结束整轮。结束该分支后，继续调查其他有价值的方向。编排者对单个候选的回复只处理该候选，除非明确要求结束整个审查。',
     `运行：${view.id}；ProjectSource：${request.project_source_id}；目标：${request.goal}`,
     `授权能力：${JSON.stringify(request.permissions)}${scenarioId ? `；本地仿真场景：${scenarioId}` : ''}`,
     '只使用当前 DSH Session 提供的只读文件观察和 Reporter 工具。仿真动作必须经 LocalReporter/Runtime/Engine，等待 Superagent 的真实响应；不得伪造回复、直接修改业务状态或发布平台消息。',
-    request.ticket_id ? '当前有一个与目标项目绑定的执行者工作区，只读代码和测试是否有助于调查由你自行判断；不要为了格式或清单而读取文件。源码只能用于理解和交叉核对，问题判断必须依据真实用户可观察行为。' : '',
-    '发现候选问题或需要补充信息时调用 reporter_candidate。Orchestrator 可以通过本 Session 回答你；Reporter 无权决定创建工单。',
-    '调查完成后调用 reporter_submit_report，给出简短摘要和自由文本完整报告。无需 JSON 或固定模板。',
+    request.ticket_id ? `当前 DSH Workspace 绑定到同项目执行工单 ${request.ticket_id} 的只读目录。主动审查实现和相关测试，并根据线索扩展到关联调用路径、组件与失败处理；具体检查范围由你判断，不要只停留在单个文件表面。` : '没有绑定源码工作区时，说明无法直接审查源码并继续可用的 GUI 调查。',
+    request.permissions.browser ? '本次已授权截图 GUI。请使用实际截图图像观察界面，并通过 GUI 像真实用户一样交互；只读 HTTP 或可访问性文本不能代替截图审查。' : '本次未授权截图 GUI，不要声称看过截图；如实说明后继续源码和其他授权方向。',
+    '发现可信候选或需要协助时可调用 reporter_candidate；编排者决定是否派工。单个候选的处理结果不结束本轮其他调查。',
+    '完成对当前可用源码与截图 GUI 方向的充分调查后，调用 reporter_submit_report，说明实际调查、证实/排除/受阻的分支及其依据。摘要和完整报告均为自由文本，不要求 JSON、固定模板、最少发现数或文件清单。',
   ].filter(Boolean).join('\n')
 }
 
@@ -65,6 +70,15 @@ interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: 
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router', REPORTER_PRESET = 'dsh-superagent-reporter'
+
+/** Serialize a tool result as text while passing a top-level DSH image reference through its native image block. */
+export function renderSessionToolOutput(value: unknown): ContentBlock[] {
+  const output = value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+  const image = output?.image
+  const textValue = image ? Object.fromEntries(Object.entries(output!).filter(([key]) => key !== 'image')) : value
+  const content = [{ type: 'text' as const, text: JSON.stringify(textValue) ?? String(textValue) }]
+  return image ? [...content, { type: 'image' as const, attachment: image as ImageAttachmentRef }] : content
+}
 
 /** Prefer xhigh only when the active DSH model route advertises it; otherwise keep that route's default effort. */
 export function selectReporterModel(catalog: Pick<ModelCatalog, 'default' | 'groups'>): RoleModel {
@@ -265,9 +279,7 @@ export class Sessions {
     return (name, description, schema, execute) => {
       binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
-          const text = { type: 'text' as const, text: JSON.stringify(value) }
-          const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
-          return image ? [text, { type: 'image' as const, attachment: image }] : [text]
+          return renderSessionToolOutput(value)
         } },
         execute: (args, execution) => execute(schema.parse(args), execution.signal) }))
     }

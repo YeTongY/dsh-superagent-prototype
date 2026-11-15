@@ -1,15 +1,40 @@
 /** 真实 Runtime/Engine 的本地 Reporter 闭环；不调用平台消息 API 或模型。 */
 import { afterEach, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Commands } from '../src/infra/commands.ts'
 import { projectSourceId } from '../src/project-source.ts'
 import { gitlabKind } from '../src/sources/gitlab.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
-import { createRuntimeReporterBrowserFactory } from '../src/app/runtime.ts'
+import { createRuntimeReporterBrowserFactory, reporterScreenshotAttacher } from '../src/app/runtime.ts'
 import { reporterTools } from '../src/app/tools/reporter.ts'
 import { inject as runtimeInject } from '../src/index.ts'
 
 let host: Host | undefined
 afterEach(async () => { await host?.stop(); host = undefined; vi.unstubAllEnvs() })
+
+it('attaches screenshots only for the Reporter Session’s exact DSH model route', async () => {
+  const ctx = new Context()
+  const image = { attachmentId: 'reporter-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 }
+  const saveImage = vi.fn(async () => image)
+  const resolveModelInfo = vi.fn(async (): Promise<{ inputModalities?: string[] }> => ({ inputModalities: ['text', 'image'] }))
+  ctx.reflect.provide('attachments', { saveImage, imageLimits: { maxImageBytes: 100, maxMessageImageBytes: 80 } })
+  ctx.reflect.provide('llm', { resolveModelInfo })
+  const agent = { ctx, session: { requestHeader: () => ({ config: { provider: 'codex-custom', model: 'gpt-6.1-sol' } }) },
+    options: { provider: 'fallback-provider', model: 'fallback-model' } } as unknown as Agent
+  const signal = new AbortController().signal
+
+  expect(await reporterScreenshotAttacher(agent)(Buffer.from('png'), signal)).toEqual({ status: 'attached', image })
+  expect(resolveModelInfo).toHaveBeenCalledWith('codex-custom', 'gpt-6.1-sol', signal)
+  expect(saveImage).toHaveBeenCalledWith({ data: Buffer.from('png'), mediaType: 'image/png', name: expect.stringMatching(/^reporter-.*\.png$/) })
+
+  resolveModelInfo.mockResolvedValueOnce({ inputModalities: ['text'] })
+  expect(await reporterScreenshotAttacher(agent)(Buffer.from('png'), signal)).toMatchObject({ status: 'unsupported', reason: 'model_does_not_accept_images' })
+  resolveModelInfo.mockResolvedValueOnce({ inputModalities: undefined })
+  expect(await reporterScreenshotAttacher(agent)(Buffer.from('png'), signal)).toMatchObject({ status: 'unknown', reason: 'model_image_capability_unknown' })
+  expect(await reporterScreenshotAttacher(agent)(Buffer.alloc(81), signal)).toMatchObject({ status: 'too_large', reason: 'screenshot_exceeds_attachment_limit' })
+  expect(saveImage).toHaveBeenCalledOnce()
+})
 
 it('keeps DSH Connection optional until browser mode requests its authenticated URL', async () => {
   expect(runtimeInject).not.toContain('connection')
@@ -20,7 +45,7 @@ it('keeps DSH Connection optional until browser mode requests its authenticated 
   expect(host.runtime.reporterRuns).toBeDefined()
 
   const factory = createRuntimeReporterBrowserFactory({ host: '127.0.0.1', port: 3082, protocol: 'http:' }, () => undefined)
-  await expect(factory.create(new AbortController().signal)).rejects.toMatchObject({ code: 'browser_unavailable' })
+  await expect(factory.create('reporter-test', new AbortController().signal)).rejects.toMatchObject({ code: 'browser_unavailable' })
 })
 
 it('runs a request and worker report through Engine while capturing replies locally', async () => {
@@ -68,27 +93,38 @@ it('keeps Reporter off in ordinary runtime configuration', async () => {
   expect(host.runtime.reporter).toBeUndefined()
 })
 
-it('offers the bound executor workspace without prescribing an inspection path', async () => {
+it('requires critical source and screenshot GUI review while leaving investigation choices to Reporter', async () => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_BROWSER', '1')
   host = await startRuntime()
   const { ticket } = await host.acceptedTicket(feishu('reporter-code-reference', '@agent-bot review the settings flow'))
   const run = await host.runtime.reporterRuns!.start({ idempotency_key: 'reporter-code-reference', goal: '以普通项目维护者视角核对设置操作是否符合预期',
-    project_source_id: 'github', mode: 'real-service', permissions: { read_only_service: true }, ticket_id: ticket.id })
+    project_source_id: 'github', mode: 'browser', permissions: { browser: true }, ticket_id: ticket.id })
 
   expect(host.restrictions.get(run.session_id)).toEqual([{ allow: ['read', 'read_image', 'glob', 'grep'] }])
   const initialPrompt = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery => delivery.sessionId === run.session_id)?.text
   const systemPrompt = host.systemPrompts.get(run.session_id)?.map(section => section.text({})).join('\n')
-  expect(initialPrompt).toContain('独立决定从哪里开始')
-  expect(initialPrompt).toContain('你可以自行判断读取其中代码或测试是否有助于调查')
-  expect(initialPrompt).not.toContain('先用 DSH 原生只读文件工具')
-  expect(initialPrompt).not.toContain('检查项目入口及与目标相关的实现和测试')
-  expect(initialPrompt).not.toContain('在完整报告中列出实际查看的文件')
-  expect(systemPrompt).toContain('调查方向、工具选择、验证顺序和结束时机都由你根据实际反馈自行决定')
-  expect(systemPrompt).toContain('只读代码和测试是否有助于调查由你自行判断')
-  expect(systemPrompt).not.toContain('先用 DSH 原生只读文件工具')
-  expect(systemPrompt).not.toContain('检查项目入口及与目标相关的实现和测试')
-  expect(systemPrompt).not.toContain('在完整报告中列出实际查看的文件')
+  expect(initialPrompt).toContain('尽可能寻找实现薄弱点、失败路径、界面问题和行为矛盾')
+  expect(initialPrompt).toContain('结合同项目源码审查与实际截图 GUI 操作')
+  expect(initialPrompt).toContain('具体审查哪个区域、提出什么假设、使用哪些工具以及按什么顺序继续，由你自主判断')
+  expect(initialPrompt).toContain('没有实际看到截图图像时，不得称为完成了截图审查')
+  expect(initialPrompt).toContain('一次候选被否定、一个页面或工具受阻')
+  expect(initialPrompt).toContain('同项目只读源码工作区')
+  expect(initialPrompt).toContain('本次已授权截图 GUI。请实际观察截图图像并像真实用户一样操作界面')
+  expect(systemPrompt).toContain('主动、挑剔的产品审查者')
+  expect(systemPrompt).toContain('结合同项目源码审查与实际截图 GUI 操作')
+  expect(systemPrompt).toContain('静态实现证据本身可以支持候选')
+  expect(systemPrompt).toContain('一个候选被否定、一个页面或工具受阻')
+  expect(systemPrompt).toContain('编排者对单个候选的回复只处理该候选')
+  expect(systemPrompt).not.toContain('不要为了格式或清单而读取文件')
+  expect(systemPrompt).not.toContain('问题判断必须依据真实用户可观察行为')
+
+  const orchestratorTools = host.tools.get(host.runtime.masterId)!
+  const replyTool = orchestratorTools.get('orchestrator_reporter_reply')!
+  expect(replyTool.description).toContain('只处理当前候选')
+  expect(replyTool.description).toContain('进一步调查方向由 Reporter 自主选择')
+  expect(replyTool.description).toContain('Reporter 的观察不是用户授权')
 })
 
 it('exchanges Reporter findings, orchestrator replies and its free-text report through native DSH Sessions', async () => {

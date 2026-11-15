@@ -28,7 +28,7 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
     mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
 
-type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
+type RegisteredTool = { name: string; description?: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
 type SystemPromptSection = { name: string; text: (context: { signal?: AbortSignal }) => string; interpolate?: boolean; order?: number }
 type FakeAgent = {
   id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }

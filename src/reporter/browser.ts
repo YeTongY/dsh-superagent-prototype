@@ -1,20 +1,41 @@
 /** 仅供本地 Reporter 使用的、受限的管理页浏览器通道。 */
 import type { Browser, BrowserContext, Locator, Page } from 'playwright'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { z } from 'zod'
 
 const fieldRole = z.enum(['textbox', 'searchbox', 'combobox'])
 const pressKey = z.enum(['Enter', 'Escape', 'ArrowDown', 'ArrowUp', 'Space'])
 const name = z.string().trim().min(1).max(160)
+const coordinate = z.number().int().nonnegative()
+const scrollDelta = z.number().int().min(-1_200).max(1_200)
 
-/** 模型只能选择控件语义，不能提供 URL、CSS/XPath 或脚本。 */
+/** 模型可用语义控件或当前截图坐标操作界面，不能提供 URL、CSS/XPath 或脚本。 */
 export const ReporterBrowserActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('snapshot') }).strict(),
   z.object({ kind: z.literal('click'), role: z.enum(['button', 'tab']), name }).strict(),
+  z.object({ kind: z.literal('click_at'), x: coordinate, y: coordinate }).strict(),
   z.object({ kind: z.literal('fill'), role: fieldRole, name, value: z.string().max(2_000) }).strict(),
   z.object({ kind: z.literal('press'), role: fieldRole, name, key: pressKey }).strict(),
+  z.object({ kind: z.literal('scroll'), x: coordinate.optional(), y: coordinate.optional(), delta_x: scrollDelta.default(0),
+    delta_y: scrollDelta.refine(value => value !== 0, '滚动必须有非零的纵向位移') }).strict()
+    .superRefine((action, context) => {
+      if ((action.x === undefined) !== (action.y === undefined)) context.addIssue({ code: 'custom', message: '滚动坐标必须同时提供 x 和 y' })
+    }),
+  z.object({ kind: z.literal('set_viewport'), width: z.number().int().min(320).max(1_920), height: z.number().int().min(320).max(1_440) }).strict(),
+  z.object({ kind: z.literal('show_superagent') }).strict(),
   z.object({ kind: z.literal('back') }).strict(),
 ])
 export type ReporterBrowserAction = z.infer<typeof ReporterBrowserActionSchema>
+
+export type ReporterScreenshotStatus = 'attached' | 'unsupported' | 'unknown' | 'unavailable' | 'too_large' | 'attachment_failed'
+
+export interface ReporterScreenshotAttachment {
+  status: ReporterScreenshotStatus
+  reason?: string
+  image?: ImageAttachmentRef
+}
+
+export type ReporterScreenshotAttacher = (data: Uint8Array, signal: AbortSignal) => Promise<ReporterScreenshotAttachment>
 
 export interface ReporterBrowserObservation {
   /** 只有路径会交给模型；query、hash、cookie 和完整 origin 不会进入观察结果。 */
@@ -22,6 +43,9 @@ export interface ReporterBrowserObservation {
   title: string
   accessibility_snapshot: string
   snapshot_truncated: boolean
+  panel_status: 'active' | 'inactive' | 'unknown'
+  viewport: { width: number; height: number }
+  screenshot: { status: ReporterScreenshotStatus; reason?: string }
   page_errors: number
   /** 被安全边界拦截的唯一路径摘要，不含 host、query、body、header。 */
   blocked_requests: { method: string; pathname: string }[]
@@ -31,8 +55,8 @@ export interface ReporterBrowserObservation {
 }
 
 export interface ReporterBrowserDriver {
-  observe(signal: AbortSignal): Promise<ReporterBrowserObservation>
-  act(action: ReporterBrowserAction, signal: AbortSignal): Promise<{ result: 'completed'; observation: ReporterBrowserObservation }>
+  observe(signal: AbortSignal): Promise<{ observation: ReporterBrowserObservation; image?: ImageAttachmentRef }>
+  act(action: ReporterBrowserAction, signal: AbortSignal): Promise<{ result: 'completed'; observation: ReporterBrowserObservation; image?: ImageAttachmentRef }>
   close(): Promise<void>
 }
 
@@ -40,7 +64,8 @@ export interface ReporterBrowserDriver {
 export class ReporterBrowserError extends Error {
   constructor(readonly code: 'browser_unavailable' | 'browser_auth_url_invalid' | 'browser_navigation_failed'
     | 'browser_panel_not_found' | 'browser_observation_failed' | 'browser_action_invalid' | 'browser_action_not_unique'
-    | 'browser_action_failed' | 'browser_origin_changed') {
+    | 'browser_action_failed' | 'browser_origin_changed' | 'browser_screenshot_failed' | 'browser_visual_unavailable'
+    | 'browser_panel_not_active') {
     super(code)
     this.name = 'ReporterBrowserError'
   }
@@ -154,7 +179,7 @@ async function uniqueVisible(locator: Locator): Promise<Locator> {
   return locator
 }
 
-function locatorFor(page: Page, action: Exclude<ReporterBrowserAction, { kind: 'snapshot' | 'back' }>): Locator {
+function locatorFor(page: Page, action: Exclude<ReporterBrowserAction, { kind: 'snapshot' | 'back' | 'click_at' | 'scroll' | 'set_viewport' | 'show_superagent' }>): Locator {
   if (action.kind === 'click' && action.role === 'tab') {
     return page.locator('.dt-tabs').getByRole('tab', { name: action.name, exact: true })
   }
@@ -168,6 +193,29 @@ function locatorFor(page: Page, action: Exclude<ReporterBrowserAction, { kind: '
   return root.getByRole(action.role, { name: action.name, exact: true })
 }
 
+/** The screenshot uses CSS pixels from the current viewport; interactions stay inside the visible product panel. */
+export function reporterBrowserPointAllowed(viewport: { width: number; height: number }, bounds: { x: number; y: number; width: number; height: number },
+  point: { x: number; y: number }): boolean {
+  return Number.isInteger(point.x) && Number.isInteger(point.y) && point.x >= 0 && point.y >= 0
+    && point.x < viewport.width && point.y < viewport.height
+    && point.x >= bounds.x && point.y >= bounds.y && point.x < bounds.x + bounds.width && point.y < bounds.y + bounds.height
+}
+
+/** Capture a real viewport PNG, then persist it through the caller's DSH attachment capability. */
+export async function captureReporterScreenshot(page: Pick<Page, 'screenshot'>, attach: ReporterScreenshotAttacher | undefined,
+  signal: AbortSignal): Promise<ReporterScreenshotAttachment> {
+  signal.throwIfAborted()
+  if (!attach) return { status: 'unavailable', reason: 'dsh_attachment_service_unavailable' }
+  let data: Buffer
+  try { data = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', caret: 'hide' }) }
+  catch {
+    signal.throwIfAborted()
+    throw new ReporterBrowserError('browser_screenshot_failed')
+  }
+  signal.throwIfAborted()
+  return attach(data, signal)
+}
+
 /**
  * 启动隔离的 Chromium context。测试可以注入 launchBrowser；生产环境动态加载
  * Playwright，因此默认未安装浏览器的镜像仍可运行其他 Reporter 模式。
@@ -175,6 +223,7 @@ function locatorFor(page: Page, action: Exclude<ReporterBrowserAction, { kind: '
 export async function createReporterBrowserDriver(options: {
   expectedOrigin: string
   getAuthenticatedUrl: () => string
+  attachScreenshot?: ReporterScreenshotAttacher
   signal?: AbortSignal
   launchBrowser?: () => Promise<Browser>
 }): Promise<ReporterBrowserDriver> {
@@ -185,6 +234,7 @@ export async function createReporterBrowserDriver(options: {
   let page: Page | undefined
   let closed = false
   let pageErrors = 0, consoleErrors = 0, blockedConsoleErrors = 0
+  let lastVisualViewport: { width: number; height: number } | undefined
   const blockedRequests: ReporterBrowserObservation['blocked_requests'] = []
   const blockedRequestKeys = new Set<string>()
   const recordBlockedRequest = (request: { url(): string; method(): string }) => {
@@ -295,18 +345,31 @@ export async function createReporterBrowserDriver(options: {
     return page
   }
 
-  const observe = async (signal: AbortSignal): Promise<ReporterBrowserObservation> => {
+  const observe = async (signal: AbortSignal): Promise<{ observation: ReporterBrowserObservation; image?: ImageAttachmentRef }> => {
     const currentPage = ensureOpen(signal)
     try {
-      const [search, tabs, main, title] = await withSignal(Promise.all([
+      const viewport = currentPage.viewportSize()
+      if (!viewport) throw new ReporterBrowserError('browser_observation_failed')
+      const panel = currentPage.getByRole('button', { name: 'Superagent', exact: true })
+      const panelCount = await panel.count()
+      const panelActive = panelCount === 1 && await panel.isVisible() && await panel.getAttribute('aria-current') === 'page'
+        && await currentPage.locator('#dt-page').isVisible()
+      const panelStatus: ReporterBrowserObservation['panel_status'] = panelCount !== 1 ? 'unknown'
+        : panelActive ? 'active' : 'inactive'
+      const [search, tabs, main, title] = panelActive ? await withSignal(Promise.all([
         currentPage.locator('.dt-page .dt-search').ariaSnapshot(), currentPage.locator('.dt-tabs').ariaSnapshot(),
         currentPage.locator('#dt-page').ariaSnapshot(), currentPage.title(),
-      ]), signal, close)
-      const snapshot = `${search}\n${tabs}\n${main}`
+      ]), signal, close) : ['', '', '', await currentPage.title()]
+      const snapshot = panelActive ? `${search}\n${tabs}\n${main}`
+        : 'Superagent 面板当前不是活动面板。当前只提供视口截图和页面基础信息；可用 show_superagent 恢复后继续读取面板控件。'
       const path = reporterBrowserPath(currentPage.url(), expectedOrigin)
-      return { path, title: title.slice(0, 160), accessibility_snapshot: snapshot.slice(0, MAX_SNAPSHOT_CHARS),
-        snapshot_truncated: snapshot.length > MAX_SNAPSHOT_CHARS, page_errors: pageErrors, blocked_requests: blockedRequests.slice(),
-        console_errors: consoleErrors, blocked_console_errors: blockedConsoleErrors }
+      const attachment = await withSignal(captureReporterScreenshot(currentPage, options.attachScreenshot, signal), signal, close)
+      lastVisualViewport = attachment.status === 'attached' && attachment.image ? viewport : undefined
+      const observation: ReporterBrowserObservation = { path, title: title.slice(0, 160), accessibility_snapshot: snapshot.slice(0, MAX_SNAPSHOT_CHARS),
+        snapshot_truncated: snapshot.length > MAX_SNAPSHOT_CHARS, panel_status: panelStatus, viewport,
+        screenshot: { status: attachment.status, ...(attachment.reason ? { reason: attachment.reason } : {}) },
+        page_errors: pageErrors, blocked_requests: blockedRequests.slice(), console_errors: consoleErrors, blocked_console_errors: blockedConsoleErrors }
+      return { observation, ...(attachment.image ? { image: attachment.image } : {}) }
     } catch (error) {
       if (error instanceof ReporterBrowserError || signal.aborted) throw error
       throw new ReporterBrowserError('browser_observation_failed')
@@ -318,23 +381,48 @@ export async function createReporterBrowserDriver(options: {
     const parsed = ReporterBrowserActionSchema.safeParse(input)
     if (!parsed.success) throw new ReporterBrowserError('browser_action_invalid')
     const action = parsed.data
-    if (action.kind === 'snapshot') return { result: 'completed' as const, observation: await observe(signal) }
+    if (action.kind === 'snapshot') return { result: 'completed' as const, ...await observe(signal) }
     try {
-      let target: Locator
-      if (action.kind === 'back') {
-        target = currentPage.locator('#dt-page .dt-page-head').getByRole('button').first()
+      let result: Promise<unknown>
+      if (action.kind === 'show_superagent') {
+        const panel = await uniqueVisible(currentPage.getByRole('button', { name: 'Superagent', exact: true }))
+        if (await panel.getAttribute('aria-current') !== 'page') {
+          await withSignal(panel.click({ timeout: ACTION_TIMEOUT_MS }), signal, close)
+          await withSignal(currentPage.locator('#dt-page').waitFor({ state: 'visible', timeout: NAVIGATION_TIMEOUT_MS }), signal, close)
+        }
+        result = Promise.resolve()
+      } else if (action.kind === 'set_viewport') {
+        result = currentPage.setViewportSize({ width: action.width, height: action.height })
+      } else if (action.kind === 'click_at' || action.kind === 'scroll') {
+        const panel = currentPage.getByRole('button', { name: 'Superagent', exact: true })
+        const viewport = currentPage.viewportSize()
+        const bounds = await currentPage.locator('#dt-page').boundingBox()
+        if (!viewport || !bounds || await panel.getAttribute('aria-current') !== 'page' || !await currentPage.locator('#dt-page').isVisible()) {
+          throw new ReporterBrowserError('browser_panel_not_active')
+        }
+        if (!lastVisualViewport || lastVisualViewport.width !== viewport.width || lastVisualViewport.height !== viewport.height) {
+          throw new ReporterBrowserError('browser_visual_unavailable')
+        }
+        const point = action.kind === 'click_at' ? { x: action.x, y: action.y }
+          : { x: action.x ?? Math.floor(bounds.x + bounds.width / 2), y: action.y ?? Math.floor(bounds.y + bounds.height / 2) }
+        if (!reporterBrowserPointAllowed(viewport, bounds, point)) throw new ReporterBrowserError('browser_action_invalid')
+        lastVisualViewport = undefined
+        if (action.kind === 'click_at') result = currentPage.mouse.click(point.x, point.y, { button: 'left', clickCount: 1, delay: 0 })
+        else result = (async () => { await currentPage.mouse.move(point.x, point.y); await currentPage.mouse.wheel(action.delta_x, action.delta_y) })()
       } else {
-        target = locatorFor(currentPage, action)
+        let target: Locator
+        if (action.kind === 'back') target = currentPage.locator('#dt-page .dt-page-head').getByRole('button').first()
+        else target = locatorFor(currentPage, action)
+        target = await uniqueVisible(target)
+        result = action.kind === 'click' || action.kind === 'back'
+          ? target.click({ timeout: ACTION_TIMEOUT_MS })
+          : action.kind === 'fill'
+            ? target.fill(action.value, { timeout: ACTION_TIMEOUT_MS })
+            : target.press(action.key, { timeout: ACTION_TIMEOUT_MS })
       }
-      target = await uniqueVisible(target)
-      const result = action.kind === 'click' || action.kind === 'back'
-        ? target.click({ timeout: ACTION_TIMEOUT_MS })
-        : action.kind === 'fill'
-          ? target.fill(action.value, { timeout: ACTION_TIMEOUT_MS })
-          : target.press(action.key, { timeout: ACTION_TIMEOUT_MS })
       await withSignal(result, signal, close)
       await withSignal(currentPage.waitForTimeout(150), signal, close)
-      return { result: 'completed' as const, observation: await observe(signal) }
+      return { result: 'completed' as const, ...await observe(signal) }
     } catch (error) {
       if (error instanceof ReporterBrowserError || signal.aborted) throw error
       throw new ReporterBrowserError('browser_action_failed')

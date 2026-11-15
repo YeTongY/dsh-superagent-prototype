@@ -2,6 +2,8 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
@@ -11,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, latestReport, liveTicket, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -38,7 +41,7 @@ import { gitlabMergeRequestEndNotices } from '../sources/gitlab-pull.ts'
 import { createLocalReporter, type LocalReporter } from '../reporter/local-reporter.ts'
 import { reporterTriggerId, type ReporterRuntimeSnapshot } from '../reporter/protocol.ts'
 import { ReporterAutonomousRuns, type ReporterAutonomousHost } from '../reporter/autonomous.ts'
-import { createReporterBrowserDriver, ReporterBrowserError } from '../reporter/browser.ts'
+import { createReporterBrowserDriver, ReporterBrowserError, type ReporterScreenshotAttacher } from '../reporter/browser.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -62,14 +65,49 @@ const now = (): string => new Date().toISOString()
 /** 仅用于生成一次性浏览器登录 URL 的最小 DSH Host Connection 接口。 */
 export interface ReporterBrowserConnection { authenticatedUrl(baseUrl: string): string }
 
+/** Only attach a screenshot when DSH confirms that this Session's exact model route accepts images. */
+export function reporterScreenshotAttacher(agent: Agent): ReporterScreenshotAttacher {
+  return async (data, signal) => {
+    const attachments = agent.ctx.get('attachments')
+    if (!attachments) return { status: 'unavailable', reason: 'dsh_attachment_service_unavailable' }
+    const route = agent.session.requestHeader()?.config
+    const provider = route?.provider ?? agent.options.provider
+    const model = route?.model ?? agent.options.model
+    const llm = agent.ctx.get('llm')
+    if (!llm || !provider || !model) return { status: 'unknown', reason: 'model_route_unresolved' }
+    let info: Awaited<ReturnType<typeof llm.resolveModelInfo>>
+    try { info = await llm.resolveModelInfo(provider, model, signal) }
+    catch {
+      signal.throwIfAborted()
+      return { status: 'unknown', reason: 'model_image_capability_lookup_failed' }
+    }
+    if (!info.inputModalities) return { status: 'unknown', reason: 'model_image_capability_unknown' }
+    if (!info.inputModalities.includes('image')) return { status: 'unsupported', reason: 'model_does_not_accept_images' }
+    if (data.byteLength > Math.min(attachments.imageLimits.maxImageBytes, attachments.imageLimits.maxMessageImageBytes)) {
+      return { status: 'too_large', reason: 'screenshot_exceeds_attachment_limit' }
+    }
+    try {
+      const image = await attachments.saveImage({ data, mediaType: 'image/png', name: `reporter-${randomUUID()}.png` })
+      signal.throwIfAborted()
+      return { status: 'attached', image }
+    } catch {
+      signal.throwIfAborted()
+      return { status: 'attachment_failed', reason: 'dsh_image_attachment_failed' }
+    }
+  }
+}
+
 /** 启动时不要求浏览器认证服务；只有调用浏览器模式时才检查，并返回稳定错误码。 */
 export function createRuntimeReporterBrowserFactory(webServer: { host: string; port: number; protocol: string; getOrigin?: () => string },
-  getConnection: () => ReporterBrowserConnection | undefined): NonNullable<ReporterAutonomousHost['browser']> {
-  return { create: async signal => {
+  getConnection: () => ReporterBrowserConnection | undefined, getAgent?: (sessionId: string) => Agent | undefined): NonNullable<ReporterAutonomousHost['browser']> {
+  return { create: async (sessionId, signal) => {
     const connection = getConnection()
     if (!connection || typeof connection.authenticatedUrl !== 'function') throw new ReporterBrowserError('browser_unavailable')
+    const agent = getAgent?.(sessionId)
+    if (!agent) throw new ReporterBrowserError('browser_unavailable')
     const origin = webServer.getOrigin?.() ?? `${webServer.protocol}//${webServer.host}:${webServer.port}`
-    return createReporterBrowserDriver({ expectedOrigin: origin, getAuthenticatedUrl: () => connection.authenticatedUrl(origin), signal })
+    return createReporterBrowserDriver({ expectedOrigin: origin, getAuthenticatedUrl: () => connection.authenticatedUrl(origin),
+      attachScreenshot: reporterScreenshotAttacher(agent), signal })
   } }
 }
 
@@ -237,7 +275,8 @@ export class Runtime extends Service implements SourceHost {
         }
         const browserEnabled = process.env.DSH_SUPERAGENT_REPORTER_BROWSER === '1'
         // 安装浏览器驱动时不把可选 DSH Connection 变成启动依赖；仅当 Reporter 选择浏览器实验时才解析认证 URL。
-        const browser = browserEnabled ? createRuntimeReporterBrowserFactory(this.ctx.webServer, () => this.reporterConnection) : undefined
+        const browser = browserEnabled ? createRuntimeReporterBrowserFactory(this.ctx.webServer, () => this.reporterConnection,
+          sessionId => this.ctx.agents.get(sessionId as SessionId)) : undefined
         this.reporterRuns = new ReporterAutonomousRuns({ store, reporter: this.reporter, enabled: true, stateDir: machine.stateDir,
           resolveProject: resolveReporterProject,
           allowedActors: id => resolveReporterProject(id) ? store.settings().policy.sources[id]?.allowed.map(actor => actor.id) ?? [] : [],
