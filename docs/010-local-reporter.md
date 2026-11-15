@@ -157,15 +157,15 @@ Reporter 生成的 Trigger 使用目标 ProjectSource 作为 source 和 Actor so
 }
 ```
 
-`mode` 可选 `simulation`、`real-service`、`browser` 或 `both`（仿真与只读接口）。每种能力还必须在 `permissions` 中显式开启，未声明的权限默认关闭。Reporter 使用 DSH 当前默认模型与 DSH 原生会话生命周期，reasoning effort 为 `xhigh`；产品不另建模型循环、调用/Token/实验预算、无进展提醒或运行截止时间。显式取消、Runtime 关闭以及 DSH/模型/工具真实错误仍按各自生命周期结束。
+`mode` 可选 `simulation`、`real-service`、`browser` 或 `both`（仿真与只读接口）。每种能力还必须在 `permissions` 中显式开启，未声明的权限默认关闭。Reporter 使用 DSH 当前默认模型与 DSH 原生会话生命周期；仅当精确模型路由声明支持时才优先使用 `xhigh`，否则沿用该路由已选或默认的推理等级。产品不另建模型循环、调用/Token/实验预算、无进展提醒或运行截止时间。显式取消、Runtime 关闭以及 DSH/模型/工具真实错误仍按各自生命周期结束。
 
-仿真动作经现有 LocalReporter、Runtime 和 Engine；每条动作都等待真实 Superagent 目标响应，不能伪造回复。只读服务能力访问固定枚举管理接口。浏览器能力使用受限 Playwright Chromium 观察和操作本地管理页面；不能用接口探测代替页面操作。
+仿真动作经现有 LocalReporter、Runtime 和 Engine；每条动作都等待真实 Superagent 目标响应，不能伪造回复。开启仿真权限时，Reporter 可按需读取当前运行公开的 Persona、允许 Actor、已有对话和下一序号；该工具绑定当前 DSH Session 所属场景，不接受模型传入场景 ID，也不返回隐藏 Oracle。只读服务能力访问固定枚举管理接口。浏览器能力使用受限 Playwright Chromium 观察和操作本地管理页面；不能用接口探测代替页面操作。
 
 每次 Reporter 运行有一个真实、可恢复、可从 DSH 会话目录打开的 Session。superagent 页面只保留会话 ID、状态和报告投影；Session 历史、工具轮次、Inbox、用量与渲染由 DSH 持有。
 
 运行可选绑定 `ticket_id` 以提供执行者工作区作为证据来源。服务端校验 Ticket 与 ProjectSource 后，把 Reporter Workspace 指向该工单的 `execution.directory`；工单完成后，只要目录仍存在，仍可只读复核。是否查看实现、测试或报告，以及查看哪些文件，由 Reporter 根据目标自行决定；启动提示不会规定先读什么或必须完成哪些检查。未绑定工单时不开放文件读取/搜索工具。Reporter 永远不能写文件、执行 shell、改变 Ticket 或直接派工。
 
-Reporter 发现候选或需要澄清时调用 `reporter_candidate`，本地 relay 即时把观察送入 Orchestrator 主 Session。Orchestrator 可调用 `orchestrator_reporter_reply` 把追问送入同一个 Reporter Session，Reporter 读取回复并继续调查。候选不等同于修复授权；是否值得修复、是否派给执行者仍由 Orchestrator 判断。
+Reporter 发现候选或需要澄清时调用 `reporter_candidate`，本地 relay 即时把观察送入 Orchestrator 主 Session。Orchestrator 可调用 `orchestrator_reporter_reply`，沿用执行者输入使用的 DSH steer 投递，把回复放入同一个 Reporter Session 当前轮可读取的下一步 Inbox。Reporter 读取回复后可自行决定如何继续调查。候选不等同于修复授权；是否值得修复、是否派给执行者仍由 Orchestrator 判断。
 
 完成后 Reporter 调用 `reporter_submit_report`，提交一段摘要和自由文本完整报告；不要求 JSON 或固定模板。报告同时显示在 Superagent 管理页并经本地 relay 交给 Orchestrator。页面使用已有 `MarkdownLite` 和 `SessionButton`；完整对话历史只由 DSH Session 保存与原生呈现，不复制一份 transcript 或 renderer。
 

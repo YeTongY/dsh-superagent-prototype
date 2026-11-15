@@ -22,6 +22,17 @@ export function reporterTools(host: ReporterToolsHost, sessionId: string, contex
 
   if (request.permissions.simulation && scenarioId) {
     tools.push(tool({
+      name: 'reporter_simulator_feedback',
+      description: '按需读取当前运行的仿真场景向你公开的信息、允许的用户身份、已有对话和下一序号。不含隐藏预期结果；场景由当前 Session 固定，不能选择其他场景。',
+      schema: z.object({}).strict(),
+      execute: async () => {
+        const feedback = host.reporter.simulatorFeedback(scenarioId)
+        if (!feedback) throw new Error('Reporter scenario is unavailable')
+        return { visible: feedback.scenario.visible, actors: feedback.scenario.actors, last_sequence: feedback.last_sequence,
+          next_sequence: feedback.last_sequence + 1, conversation: feedback.conversation }
+      },
+    }))
+    tools.push(tool({
       name: 'reporter_simulate_user_action',
       description: '作为目标 ProjectSource 中的一个已授权用户执行一条真实本地仿真动作。每次调用先读取上一条反馈中的 next_sequence；动作经 Runtime/Engine，随后等待 Superagent 的真实处理结果。',
       schema: z.object({

@@ -106,7 +106,7 @@ describe('Reporter DSH Session projection', () => {
     await runs.reply(started.id, 'ask-for-evidence-1', '请确认是否只发生在 GitLab 项目。')
     const [sessionId, requestId, text, mode, authorize] = vi.mocked(h.host.promptSession).mock.lastCall!
     expect([sessionId, requestId, text, mode]).toEqual([started.session_id, `reporter-reply:${started.id}:ask-for-evidence-1`,
-      expect.stringContaining('不是用户新授权'), 'queue'])
+      expect.stringContaining('不是用户新授权'), 'steer'])
     expect(authorize).toEqual(expect.any(Function))
     expect(runs.get(started.id)?.status).toBe('waiting')
     await expect(runs.reply(started.id, 'bad id with spaces', '继续')).rejects.toMatchObject({ code: 'invalid_reply_id' })

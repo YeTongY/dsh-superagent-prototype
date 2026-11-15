@@ -5,6 +5,7 @@ import { projectSourceId } from '../src/project-source.ts'
 import { gitlabKind } from '../src/sources/gitlab.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { createRuntimeReporterBrowserFactory } from '../src/app/runtime.ts'
+import { reporterTools } from '../src/app/tools/reporter.ts'
 import { inject as runtimeInject } from '../src/index.ts'
 
 let host: Host | undefined
@@ -104,7 +105,7 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(run.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })
   expect(host.restrictions.get(run.session_id)).toEqual([{ allow: [] }])
   const reporterTools = [...host.tools.get(run.session_id)!.keys()]
-  expect(reporterTools).toEqual(expect.arrayContaining(['reporter_simulate_user_action', 'reporter_candidate', 'reporter_submit_report']))
+  expect(reporterTools).toEqual(expect.arrayContaining(['reporter_simulator_feedback', 'reporter_simulate_user_action', 'reporter_candidate', 'reporter_submit_report']))
   expect(reporterTools).not.toEqual(expect.arrayContaining(['bash', 'pwsh', 'write', 'edit', 'subagent', 'orchestrator_route', 'orchestrator_reporter_reply']))
 
   await host.runTool(run.session_id, 'reporter_candidate', { text: '登录后的设置页返回空白，需要确认是否稳定复现。' })
@@ -118,8 +119,10 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
     text: '请在全新会话和已有会话中分别复现，并比较结果。' })
   const toReporter = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery =>
     delivery.sessionId === run.session_id && delivery.text.includes('请在全新会话'))
-  expect(toReporter).toMatchObject({ mode: 'queue' })
+  expect(toReporter).toMatchObject({ mode: 'steer' })
   expect(toReporter?.id).toMatch(/^dsh-superagent:/)
+  expect(host.agents.get(run.session_id)!.inbox.nextStep.some(message => message.id === toReporter?.id)).toBe(true)
+  expect(host.agents.get(run.session_id)!.inbox.nextTurn.some(message => message.id === toReporter?.id)).toBe(false)
 
   vi.spyOn(runtime.sessions, 'relay').mockImplementationOnce(() => { throw new Error('relay queue failed') })
   await expect(host.runTool(run.session_id, 'reporter_submit_report', { summary: '新会话首次加载设置页时出现空白。',
@@ -137,6 +140,41 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggersBefore)
   expect(runtime.store.tickets.list()).toHaveLength(ticketsBefore)
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get()?.count)).toBe(receiptsBefore)
+})
+
+it('offers only the current simulation safe projection on demand and advances its sequence with accepted input', async () => {
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  host = await startRuntime()
+  const runtime = host.runtime
+  const run = await runtime.reporterRuns!.start({ idempotency_key: 'simulator-feedback-projection', goal: '自主选择如何了解产品行为',
+    project_source_id: 'github', mode: 'simulation', permissions: { simulation: true } })
+  const feedbackTool = reporterTools({ reporter: runtime.reporter!, runs: runtime.reporterRuns!, waitForTarget: async () => {},
+    probeReadOnly: async probe_id => ({ probe_id, status: 200, body: '{}', json: true }) }, run.session_id,
+  runtime.reporterRuns!.contextForSession(run.session_id)!).find(tool => tool.name === 'reporter_simulator_feedback')!
+  const first = await host.runTool(run.session_id, 'reporter_simulator_feedback', {})
+  expect(first).toMatchObject({
+    visible: expect.objectContaining({ persona: expect.any(String), goal: '自主选择如何了解产品行为' }),
+    actors: [{ id: expect.any(String), role: 'person' }], last_sequence: 0, next_sequence: 1, conversation: [],
+  })
+  expect(first).not.toHaveProperty('oracle')
+  expect(feedbackTool.schema.safeParse({ scenario_id: 'another-run' }).success).toBe(false)
+
+  const context = runtime.reporterRuns!.contextForSession(run.session_id)!
+  const scenarioId = context.scenario_id!
+  const before = runtime.reporter!.simulatorFeedback(scenarioId)!
+  runtime.reporter!.submit({ scenario_id: scenarioId, scenario_version: before.scenario.version, sequence: first.next_sequence as number,
+    idempotency_key: `${run.id}:1`, simulated_at: '2026-11-15T00:00:00Z', actor_id: (first.actors as { id: string }[])[0]!.id,
+    project_source_id: run.project_source_id, thread_id: before.scenario.thread_id, action: { kind: 'message', text: '我想进一步了解这个项目。' } })
+
+  const after = await host.runTool(run.session_id, 'reporter_simulator_feedback', {})
+  expect(after).toMatchObject({ last_sequence: 1, next_sequence: 2,
+    conversation: [{ role: 'actor', actor_id: (first.actors as { id: string }[])[0]!.id, text: '我想进一步了解这个项目。' }] })
+  expect(after).not.toHaveProperty('oracle')
+
+  const withoutSimulation = await runtime.reporterRuns!.start({ idempotency_key: 'no-simulation-feedback', goal: '读取服务健康状态',
+    project_source_id: 'github', mode: 'real-service', permissions: { read_only_service: true } })
+  expect(host.tools.get(withoutSimulation.session_id)?.has('reporter_simulator_feedback')).toBe(false)
 })
 
 it('projects a restored Reporter Session model from its actual DSH request header', async () => {
