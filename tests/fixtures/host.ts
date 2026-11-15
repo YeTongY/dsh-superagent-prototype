@@ -29,6 +29,7 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
 }
 
 type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
+type SystemPromptSection = { name: string; text: (context: { signal?: AbortSignal }) => string; interpolate?: boolean; order?: number }
 type FakeAgent = {
   id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }
   cancel: Mock; inject: Mock<(message: UserMessage) => void>; steer: Mock<(message: UserMessage) => void>; followup: Mock<(message: UserMessage) => void>
@@ -165,6 +166,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
   const restrictions = new Map<string, { allow: string[] }[]>()
+  const systemPrompts = new Map<string, SystemPromptSection[]>()
   // DSH restrictions apply to inherited global tools only; scoped tools remain visible and cannot be named in a mask.
   const globalToolNames = new Set(['read', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'])
   const deliveries = vi.fn<(request: Delivery) => void>()
@@ -187,7 +189,10 @@ export async function startRuntime(seed?: (store: Store) => void) {
         return () => {}
       }), guard: vi.fn(() => () => {}) })
       agentCtx.reflect.provide('skills', { register: () => () => {} })
-      agentCtx.reflect.provide('systemPrompt', { section: () => () => {} })
+      agentCtx.reflect.provide('systemPrompt', { section: (section: SystemPromptSection) => {
+        systemPrompts.set(sessionId, [...systemPrompts.get(sessionId) ?? [], section])
+        return () => { systemPrompts.set(sessionId, (systemPrompts.get(sessionId) ?? []).filter(item => item !== section)) }
+      } })
       const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[],
         // A pending message taken out, as DSH's inbox does by its id.
         remove: (id: string) => [inbox.nextTurn, inbox.nextStep].some(list => {
@@ -310,7 +315,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, restrictions, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { runtime, ctx, directory, agents, tools, restrictions, systemPrompts, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
     jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

@@ -163,7 +163,7 @@ Reporter 生成的 Trigger 使用目标 ProjectSource 作为 source 和 Actor so
 
 每次 Reporter 运行有一个真实、可恢复、可从 DSH 会话目录打开的 Session。superagent 页面只保留会话 ID、状态和报告投影；Session 历史、工具轮次、Inbox、用量与渲染由 DSH 持有。
 
-运行可选绑定 `ticket_id` 以检查执行者实现。服务端校验 Ticket 与 ProjectSource 后，把 Reporter Workspace 指向该工单的 `execution.directory`；工单完成后，只要目录仍存在，仍可只读复核。未绑定工单时不开放文件读取/搜索工具。Reporter 永远不能写文件、执行 shell、改变 Ticket 或直接派工。
+运行可选绑定 `ticket_id` 以提供执行者工作区作为证据来源。服务端校验 Ticket 与 ProjectSource 后，把 Reporter Workspace 指向该工单的 `execution.directory`；工单完成后，只要目录仍存在，仍可只读复核。是否查看实现、测试或报告，以及查看哪些文件，由 Reporter 根据目标自行决定；启动提示不会规定先读什么或必须完成哪些检查。未绑定工单时不开放文件读取/搜索工具。Reporter 永远不能写文件、执行 shell、改变 Ticket 或直接派工。
 
 Reporter 发现候选或需要澄清时调用 `reporter_candidate`，本地 relay 即时把观察送入 Orchestrator 主 Session。Orchestrator 可调用 `orchestrator_reporter_reply` 把追问送入同一个 Reporter Session，Reporter 读取回复并继续调查。候选不等同于修复授权；是否值得修复、是否派给执行者仍由 Orchestrator 判断。
 

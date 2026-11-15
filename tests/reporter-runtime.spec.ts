@@ -67,7 +67,7 @@ it('keeps Reporter off in ordinary runtime configuration', async () => {
   expect(host.runtime.reporter).toBeUndefined()
 })
 
-it('requires read-only inspection of the bound executor code using native DSH file tools', async () => {
+it('offers the bound executor workspace without prescribing an inspection path', async () => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
   host = await startRuntime()
@@ -77,9 +77,17 @@ it('requires read-only inspection of the bound executor code using native DSH fi
 
   expect(host.restrictions.get(run.session_id)).toEqual([{ allow: ['read', 'read_image', 'glob', 'grep'] }])
   const initialPrompt = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery => delivery.sessionId === run.session_id)?.text
-  expect(initialPrompt).toContain('先用 DSH 原生只读文件工具检查项目入口')
-  expect(initialPrompt).toContain('在完整报告中列出实际查看的文件')
-  expect(initialPrompt).toContain('真实用户可观察行为')
+  const systemPrompt = host.systemPrompts.get(run.session_id)?.map(section => section.text({})).join('\n')
+  expect(initialPrompt).toContain('独立决定从哪里开始')
+  expect(initialPrompt).toContain('你可以自行判断读取其中代码或测试是否有助于调查')
+  expect(initialPrompt).not.toContain('先用 DSH 原生只读文件工具')
+  expect(initialPrompt).not.toContain('检查项目入口及与目标相关的实现和测试')
+  expect(initialPrompt).not.toContain('在完整报告中列出实际查看的文件')
+  expect(systemPrompt).toContain('调查方向、工具选择、验证顺序和结束时机都由你根据实际反馈自行决定')
+  expect(systemPrompt).toContain('只读代码和测试是否有助于调查由你自行判断')
+  expect(systemPrompt).not.toContain('先用 DSH 原生只读文件工具')
+  expect(systemPrompt).not.toContain('检查项目入口及与目标相关的实现和测试')
+  expect(systemPrompt).not.toContain('在完整报告中列出实际查看的文件')
 })
 
 it('exchanges Reporter findings, orchestrator replies and its free-text report through native DSH Sessions', async () => {

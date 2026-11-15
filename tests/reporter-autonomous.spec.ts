@@ -49,9 +49,15 @@ describe('Reporter DSH Session projection', () => {
     expect(h.host.ensureSession).toHaveBeenCalledWith(first.session_id, '/work/ticket-1', expect.stringContaining('Reporter：'))
     expect(h.host.promptSession).toHaveBeenCalledWith(first.session_id, `reporter-start:${first.id}`, expect.stringContaining('自由文本完整报告'), 'queue')
     const initialPrompt = vi.mocked(h.host.promptSession).mock.calls[0]![2]
-    expect(initialPrompt).toContain('先用 DSH 原生只读文件工具检查项目入口')
-    expect(initialPrompt).toContain('在完整报告中列出实际查看的文件')
-    expect(initialPrompt).toContain('真实用户可观察行为')
+    expect(initialPrompt).toContain('独立决定从哪里开始')
+    expect(initialPrompt).toContain('不必使用每一种工具，也不必按固定顺序检查')
+    expect(initialPrompt).toContain('你可以自行判断读取其中代码或测试是否有助于调查')
+    expect(initialPrompt).toContain('不得修改文件、执行 shell、改变项目或工单状态、创建执行工单或指挥 Worker')
+    expect(initialPrompt).toContain('由编排者决定是否回复或派工')
+    expect(initialPrompt).toContain('不需要 JSON、固定模板或预设结论')
+    expect(initialPrompt).not.toContain('先用 DSH 原生只读文件工具')
+    expect(initialPrompt).not.toContain('检查项目入口及与目标相关的实现和测试')
+    expect(initialPrompt).not.toContain('在完整报告中列出实际查看的文件')
     expect(runs.contextForSession(first.session_id)).toMatchObject({ request: { ticket_id: 'ticket-1' }, scenario_id: expect.stringMatching(/^scenario-/) })
 
     const retried = await runs.start(request({ ticket_id: 'ticket-1' }))

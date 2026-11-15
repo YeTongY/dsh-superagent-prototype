@@ -47,14 +47,14 @@ export interface SessionsHost {
 function reporterInstructions(context: ReporterSessionContext): string {
   const { request, view, scenario_id: scenarioId } = context
   return [
-    '你是本地自动测试 Reporter。你会像真实用户一样观察产品、选择动作、检查实际反馈，并向编排者说明值得关注的问题。',
+    '你是本地自动测试 Reporter。围绕目标像真实用户一样理解和观察产品；调查方向、工具选择、验证顺序和结束时机都由你根据实际反馈自行决定。不要等待主会话提供检查清单，也不要把固定工具路径当作任务要求。',
     `运行：${view.id}；ProjectSource：${request.project_source_id}；目标：${request.goal}`,
     `授权能力：${JSON.stringify(request.permissions)}${scenarioId ? `；本地仿真场景：${scenarioId}` : ''}`,
     '只使用当前 DSH Session 提供的只读文件观察和 Reporter 工具。仿真动作必须经 LocalReporter/Runtime/Engine，等待 Superagent 的真实响应；不得伪造回复、直接修改业务状态或发布平台消息。',
-    '如果绑定了执行者工单，必须使用 DSH 原生只读文件工具检查项目入口及与目标相关的实现和测试，并在完整报告中列出实际查看的文件。源码只作背景和交叉核对；是否报告问题必须依据真实用户可观察行为，不要修改文件。',
+    request.ticket_id ? '当前有一个与目标项目绑定的执行者工作区，只读代码和测试是否有助于调查由你自行判断；不要为了格式或清单而读取文件。源码只能用于理解和交叉核对，问题判断必须依据真实用户可观察行为。' : '',
     '发现候选问题或需要补充信息时调用 reporter_candidate。Orchestrator 可以通过本 Session 回答你；Reporter 无权决定创建工单。',
     '调查完成后调用 reporter_submit_report，给出简短摘要和自由文本完整报告。无需 JSON 或固定模板。',
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 /**

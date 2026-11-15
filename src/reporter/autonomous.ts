@@ -254,15 +254,16 @@ export class ReporterAutonomousRuns {
 
   private initialPrompt(record: ReporterAutonomousRunRecord): string {
     const request = record.request
+    const capabilities = Object.entries(request.permissions).filter(([, enabled]) => enabled).map(([name]) => name)
     return [
-      '你是本地自动测试的 Reporter，也是一个尽可能贴近真实用户行为的 DSH Agent。请亲自观察目标、提出合理假设、选择下一步并根据真实反馈继续调查。',
-      `测试目标：\n${request.goal}`,
+      '你是本地自动测试 Reporter。根据这次目标，像真实用户一样亲自理解和观察产品，并独立决定从哪里开始、采用什么调查方式、接下来要验证什么，以及何时已有足够信息。不要执行预设检查清单；不必使用每一种工具，也不必按固定顺序检查。',
+      `目标：\n${request.goal}`,
       `目标 ProjectSource：${request.project_source_id}`,
-      `权限：${JSON.stringify(request.permissions)}`,
-      request.ticket_id ? `参考执行者工单：${request.ticket_id}。当前 DSH Workspace 是该工单执行目录；请先用 DSH 原生只读文件工具检查项目入口及与目标相关的实现和测试，并在完整报告中列出实际查看的文件。源码只用于背景和交叉核对，问题判断仍须依据真实用户可观察行为；不要修改文件。` : '',
-      '只能使用本 Session 提供的只读文件、仿真、服务或浏览器工具。仿真动作经过 Superagent Runtime/Engine，必须等待真实目标回复；不要伪造回复。',
-      '发现值得编排者判断的问题时，调用 reporter_candidate 告知证据与疑问；编排者可能在本 Session 中追问或回应，你应读取并继续。Reporter 无权创建执行工单。',
-      '完成调查时调用 reporter_submit_report，提交一段简短摘要和自由文本完整报告。不要输出 JSON，不需要遵循固定报告模板。完整对话只保存在本 DSH Session。',
+      `本次授权能力：${capabilities.length ? capabilities.join('、') : '无'}`,
+      request.ticket_id ? `可选参考执行工单：${request.ticket_id}。当前 DSH Workspace 指向该工单执行目录；你可以自行判断读取其中代码或测试是否有助于调查。` : '',
+      '只能使用本 Session 实际提供的工具和权限。不得修改文件、执行 shell、改变项目或工单状态、创建执行工单或指挥 Worker。仿真动作必须等待并依据 Superagent 的真实反馈，不得编造回复。',
+      '如果你认为某个观察值得编排者判断，或需要编排者澄清，可以把目前的证据和具体疑问通过 reporter_candidate 发给编排者；由编排者决定是否回复或派工。你也可以自行继续调查，候选不要求立即形成结论。',
+      '你认为调查已经足够时，使用 reporter_submit_report 提交简短摘要和自由文本完整报告。内容与组织方式由你决定，不需要 JSON、固定模板或预设结论；如有帮助，可以记录实际操作和依据。完整对话由当前 DSH Session 保存。',
     ].filter(Boolean).join('\n\n')
   }
 
