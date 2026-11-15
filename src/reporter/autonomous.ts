@@ -216,10 +216,17 @@ export class ReporterAutonomousRuns {
     this.update(record, { status: 'running', error_code: undefined })
   }
 
-  candidate(sessionId: string, text: string): void {
+  candidate(sessionId: string, text: string): { candidate_id: string; investigation_status: 'investigating'; continue_investigation: true } {
     const record = this.requireSession(sessionId)
     this.requireActive(record)
-    this.host.relay(`reporter-candidate:${record.view.id}:${digest(text)}`, reporterMessage(record, '调查疑点（未确认）', text))
+    const candidateId = `candidate-${digest({ runId: record.view.id, text }).slice(0, 24)}`
+    this.host.relay(`reporter-candidate:${record.view.id}:${candidateId}`, reporterMessage(record, `待验证调查分支 ${candidateId}`, [
+      `candidate_id：${candidateId}`,
+      '状态：investigating（调查中）。这是一条协作消息，不是已确认问题或工单；Reporter 会在当前 DSH Session 继续围绕同一分支调查。',
+      '',
+      text,
+    ].join('\n')))
+    return { candidate_id: candidateId, investigation_status: 'investigating', continue_investigation: true }
   }
 
   /** 提交一个已确认的问题，让它经过正常的 Runtime/Engine/Policy/Eval/Decision/Ticket 链路。 */
@@ -293,15 +300,16 @@ export class ReporterAutonomousRuns {
       '你是主动、挑剔的产品审查者，也要像真实用户一样亲自使用产品。尽可能寻找实现薄弱点、失败路径、界面问题和行为矛盾；页面能打开、服务健康或一条正常流程成功，都不能代替深入调查。',
       '结合同项目源码审查与实际截图 GUI 操作来发现和核验问题。具体审查哪个区域、提出什么假设、使用哪些工具以及按什么顺序继续，由你自主判断；不要把主会话给的目标改写成固定检查清单。若截图或代码权限/能力不可用，说明缺口，并继续调查其余可用方向；没有实际看到截图图像时，不得称为完成了截图审查。',
       '静态实现证据本身可以支持调查疑点，但不能把不确定的问题当成最终发现。分别说明代码证据、实际 GUI 观察/复现和仍待确认的推断；对仍不确定的分支继续调研、复现、排除或标记受阻，不要提交为 confirmed finding。挑剔是认真验证疑点，不是制造缺陷。',
-      '一次候选被否定、一个页面或工具受阻、服务健康或当前没有确认缺陷，都不能据此结束整轮；关闭或标记该调查分支后，继续寻找并核验其他有价值的方向。编排者对单个候选的回复只处理该候选，除非明确要求终止整个审查。不要因为等待时长而停下。',
+      '一次候选被否定、一个页面或工具受阻、服务健康或当前没有确认缺陷，都不能据此结束整轮；单个候选被否决或暂不派工不代表本轮审查结束。编排者决定候选是否值得派工，但只处理当前候选；关闭或标记该调查分支后，继续寻找并核验其他有价值的方向。不要因为等待时长而停下。',
       `目标：\n${request.goal}`,
       `目标 ProjectSource：${request.project_source_id}`,
       `本次授权能力：${capabilities.length ? capabilities.join('、') : '无'}`,
       request.ticket_id ? `同项目只读源码工作区：执行工单 ${request.ticket_id}，目录已绑定到当前 DSH Workspace。主动审查实现和相关测试，根据线索扩展到关联调用路径、组件和失败处理；具体检查范围由你决定，不要只停留在单个文件表面。` : '本次未绑定同项目代码工作区；说明无法直接审查源码的限制，并继续已授权的截图 GUI 或其他调查。',
       request.permissions.browser ? '本次已授权截图 GUI。请实际观察截图图像并像真实用户一样操作界面；仅有可访问性树或文本快照不算完成截图审查。' : '本次未授权截图 GUI，不能声称已查看截图或完成 GUI 审查；如实说明，并继续源码与其他已授权方向。',
       '只能使用本 Session 实际提供的工具和权限。不得修改文件、执行 shell、改变项目或工单状态、创建执行工单或指挥 Worker。仿真动作必须等待并依据 Superagent 的真实反馈，不得编造回复。',
-      '发现调查疑点或需要编排者协助时，使用 reporter_candidate；它只是未确认协作消息，不能作为最终问题或工单。只有证据、影响和复现/源码依据已经足够明确的问题，才使用 reporter_submit_finding 提交确认 finding，让它进入正常工单链路；该工具不接受不确定置信度。编排者决定候选是否值得派工，并按正常评估处理；单个候选被否决或暂不派工不代表本轮审查结束。',
-      '仅当你已尽力调查当前可用的源码和截图 GUI 方向、并且没有其他合理且可验证的疑点可继续时，才提交最终报告。最终“发现的问题”只能包含已经成功提交的 confirmed finding；不确定分支应继续调查、排除或作为受阻背景说明，不能写成问题结论。报告长度和组织由你决定，不需要 JSON、固定模板、最少发现数或文件清单。完整对话由当前 DSH Session 保存。',
+      '发现未确认疑点时，使用 reporter_candidate 将它作为待验证调查分支发送给编排者协作。工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true。调用后必须继续在当前 DSH Session 围绕这个同一分支调查、复现和核验证据，不能因为已 relay 就等待批准、改查别的问题或结束审查。编排者决定候选是否值得派工；编排者对单个候选的回复只处理该候选，可以提供证据或意见，但不替代核验。单个候选被否决或暂不派工不代表本轮审查结束。',
+      '只有证据、影响和复现/源码依据已经足够明确的问题，才使用 reporter_submit_finding 提交 confirmed finding，让它进入正常工单链路；该工具不接受不确定置信度。已排除的分支不作为问题；确实受阻的分支只能作为未确认背景说明，不能作为问题结论。',
+      '仅当你已尽力调查当前可用的源码和截图 GUI 方向、没有未完成的调查分支且没有其他合理且可验证的疑点可继续时，才提交最终报告。最终“发现的问题”只能包含已经成功提交的 confirmed finding。报告长度和组织由你决定，不需要 JSON、固定模板、最少发现数或文件清单。完整对话由当前 DSH Session 保存。',
     ].filter(Boolean).join('\n\n')
   }
 

@@ -109,12 +109,16 @@ it('requires critical source and screenshot GUI review while leaving investigati
   expect(initialPrompt).toContain('结合同项目源码审查与实际截图 GUI 操作')
   expect(initialPrompt).toContain('具体审查哪个区域、提出什么假设、使用哪些工具以及按什么顺序继续，由你自主判断')
   expect(initialPrompt).toContain('没有实际看到截图图像时，不得称为完成了截图审查')
+  expect(initialPrompt).toContain('工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true')
+  expect(initialPrompt).toContain('调用后必须继续在当前 DSH Session 围绕这个同一分支调查')
   expect(initialPrompt).toContain('一次候选被否定、一个页面或工具受阻')
   expect(initialPrompt).toContain('同项目只读源码工作区')
   expect(initialPrompt).toContain('本次已授权截图 GUI。请实际观察截图图像并像真实用户一样操作界面')
   expect(systemPrompt).toContain('主动、挑剔的产品审查者')
   expect(systemPrompt).toContain('结合同项目源码审查与实际截图 GUI 操作')
   expect(systemPrompt).toContain('静态实现证据本身可以支持调查疑点')
+  expect(systemPrompt).toContain('工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true')
+  expect(systemPrompt).toContain('必须继续在当前 Reporter Session 围绕同一个分支调查')
   expect(systemPrompt).toContain('一个候选被否定、一个页面或工具受阻')
   expect(systemPrompt).toContain('编排者对单个候选的回复只处理该候选')
   expect(systemPrompt).not.toContain('不要为了格式或清单而读取文件')
@@ -144,12 +148,20 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(reporterTools).toEqual(expect.arrayContaining(['reporter_simulator_feedback', 'reporter_simulate_user_action', 'reporter_candidate', 'reporter_submit_finding', 'reporter_submit_report']))
   expect(reporterTools).not.toEqual(expect.arrayContaining(['bash', 'pwsh', 'write', 'edit', 'subagent', 'orchestrator_route', 'orchestrator_reporter_reply']))
 
-  await host.runTool(run.session_id, 'reporter_candidate', { text: '登录后的设置页返回空白，需要确认是否稳定复现。' })
+  const candidate = await host.runTool(run.session_id, 'reporter_candidate', { text: '登录后的设置页返回空白，需要确认是否稳定复现。' }) as {
+    candidate_id: string; investigation_status: string; continue_investigation: boolean
+  }
+  expect(candidate).toMatchObject({ candidate_id: expect.stringMatching(/^candidate-[a-f0-9]{24}$/),
+    investigation_status: 'investigating', continue_investigation: true })
   await runtime.effects.idle('relay')
   const toOrchestrator = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery =>
     delivery.sessionId === runtime.masterId && delivery.text.includes('登录后的设置页返回空白'))
   expect(toOrchestrator).toMatchObject({ mode: 'steer' })
+  expect(toOrchestrator?.text).toContain(`candidate_id：${candidate.candidate_id}`)
+  expect(toOrchestrator?.text).toContain('Reporter 会在当前 DSH Session 继续围绕同一分支调查')
   expect(toOrchestrator?.text).toContain('不是用户消息、用户授权或派工指令')
+  expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggersBefore)
+  expect(runtime.store.tickets.list()).toHaveLength(ticketsBefore)
 
   await host.runTool(runtime.masterId, 'orchestrator_reporter_reply', { run_id: run.id, reply_id: 'check-reproduction',
     text: '请在全新会话和已有会话中分别复现，并比较结果。' })

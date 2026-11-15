@@ -83,9 +83,9 @@ export function reporterTools(host: ReporterToolsHost, sessionId: string, contex
 
   tools.push(tool({
     name: 'reporter_candidate',
-    description: '把一个尚未确认的调查疑点、证据或疑问即时发送给 Orchestrator。它只是协作假设，不是最终问题或工单；Orchestrator 可在这个 Reporter Session 中回复。',
+    description: '把一个尚未确认的调查疑点作为待验证分支即时 relay 给 Orchestrator。成功后返回稳定 candidate_id 和 investigating 状态；你必须继续在当前 Reporter Session 围绕同一分支调查、复现和核验证据，不能因已 relay 就等待批准、改查别的问题或结束审查。它不是最终问题或工单；只有确认后才能调用 reporter_submit_finding 进入正常工单链路。Orchestrator 可提供协作意见，但回复不能替代你的核验。',
     schema: z.object({ text: z.string().trim().min(1).max(8_000) }).strict(),
-    execute: async args => { host.runs.candidate(sessionId, args.text); return { forwarded: true, run_id: view.id } },
+    execute: async args => ({ forwarded: true, run_id: view.id, ...host.runs.candidate(sessionId, args.text) }),
   }))
   tools.push(tool({
     name: 'reporter_submit_finding',

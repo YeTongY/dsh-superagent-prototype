@@ -58,6 +58,9 @@ describe('Reporter DSH Session projection', () => {
     expect(initialPrompt).toContain('静态实现证据本身可以支持调查疑点')
     expect(initialPrompt).toContain('关闭或标记该调查分支后，继续寻找并核验其他有价值的方向')
     expect(initialPrompt).toContain('编排者对单个候选的回复只处理该候选')
+    expect(initialPrompt).toContain('工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true')
+    expect(initialPrompt).toContain('调用后必须继续在当前 DSH Session 围绕这个同一分支调查')
+    expect(initialPrompt).toContain('没有未完成的调查分支')
     expect(initialPrompt).toContain('同项目只读源码工作区')
     expect(initialPrompt).not.toContain('可选参考执行工单')
     expect(initialPrompt).toContain('本次未授权截图 GUI，不能声称已查看截图或完成 GUI 审查')
@@ -103,8 +106,17 @@ describe('Reporter DSH Session projection', () => {
     const runs = new ReporterAutonomousRuns(h.host)
     const started = await runs.start(request())
     const context = runs.contextForSession(started.session_id)!
-    runs.candidate(started.session_id, '候选：需要进一步确认')
-    expect(h.host.relay).toHaveBeenLastCalledWith(expect.stringMatching(/^reporter-candidate:/), expect.stringContaining('不是用户消息'))
+    const candidate = runs.candidate(started.session_id, '候选：需要进一步确认')
+    expect(candidate).toEqual({ candidate_id: expect.stringMatching(/^candidate-[a-f0-9]{24}$/),
+      investigation_status: 'investigating', continue_investigation: true })
+    const [candidateRelayId, candidateRelayText] = vi.mocked(h.host.relay).mock.lastCall!
+    expect(candidateRelayId).toBe(`reporter-candidate:${started.id}:${candidate.candidate_id}`)
+    expect(candidateRelayText).toContain('待验证调查分支')
+    expect(candidateRelayText).toContain(`candidate_id：${candidate.candidate_id}`)
+    expect(candidateRelayText).toContain('Reporter 会在当前 DSH Session 继续围绕同一分支调查')
+    expect(candidateRelayText).toContain('不是用户消息')
+    expect(runs.candidate(started.session_id, '候选：需要进一步确认').candidate_id).toBe(candidate.candidate_id)
+    expect(h.host.relay).toHaveBeenLastCalledWith(candidateRelayId, expect.any(String))
 
     const result = await runs.submitReport(started.session_id, '发现登录后页面返回异常。', '复现步骤：\n1. 使用测试账号登录。\n2. 打开设置页。')
     expect(result).toMatchObject({ status: 'completed', summary: '发现登录后页面返回异常。', full_report: expect.stringContaining('复现步骤') })
