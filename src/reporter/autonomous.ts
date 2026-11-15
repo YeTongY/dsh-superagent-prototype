@@ -234,7 +234,9 @@ export class ReporterAutonomousRuns {
       if (prior.status !== 'pending') return { finding_id: finding.finding_id, trigger_id: prior.trigger_id, disposition: prior.status }
     }
     const project = this.host.resolveProject(record.request.project_source_id)
-    if (!project) throw new ReporterAutonomousRunError(404, 'project_not_found', '确认 finding 的 ProjectSource 不存在或已停用')
+    if (!project || project.id !== record.request.project_source_id) {
+      throw new ReporterAutonomousRunError(409, 'finding_project_mismatch', '确认 finding 的 ProjectSource 与 Reporter 运行不一致')
+    }
     const trigger = reporterFindingTrigger(record.view.id, finding, project, this.now())
     const pending: ReporterFindingSubmission = { digest: findingDigest, trigger_id: trigger.id, status: 'pending' }
     record.findings = { ...record.findings, [finding.finding_id]: pending }
