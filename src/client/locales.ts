@@ -338,6 +338,7 @@ const TEXT = {
   'basis.followup': ['线程内跟进', 'Follow-up in Thread'],
   'basis.observation': ['接收全部消息的群', 'Chat receiving all messages'],
   'basis.bot': ['名单内的机器人', 'Listed bot'],
+  'basis.reporter': ['Reporter 确认发现', 'Confirmed Reporter finding'],
   'basis.mode': ['接单模式', 'Accept mode'],
   'basis.rules': ['命中规则', 'Matched rules'],
   'basis.legacyAuthority': ['旧版授权', 'Legacy authority'],

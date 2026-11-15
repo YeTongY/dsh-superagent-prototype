@@ -9,6 +9,15 @@ const scenarioId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/).refine
 const projectId = z.string().regex(/^[a-z][a-z0-9-]{0,99}$/)
 const body = z.string().max(20_000)
 
+/** Reporter 只有在证据充分后才能提交的确认问题；不提供不确定置信度。 */
+export const ReporterFindingSchema = z.object({
+  finding_id: z.string().trim().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+  title: z.string().trim().min(1).max(200),
+  body: z.string().trim().min(1).max(20_000),
+  evidence: z.string().trim().min(1).max(20_000),
+}).strict()
+export type ReporterFinding = z.infer<typeof ReporterFindingSchema>
+
 /** Reporter 可模拟的用户动作；平台专属动作通过结构化元数据保留，不调用真实 Provider。 */
 export const ReporterActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('message'), text: z.string().min(1).max(20_000), addressed: z.enum(['mention', 'direct']).optional(),
@@ -144,6 +153,26 @@ export function reporterTrigger(definition: ReporterScenarioDefinition, envelope
 export function reporterTriggerId(scenario: string, sequence: number): string {
   const opaque = createHash('sha256').update(`${scenario}\0${sequence}`).digest('hex').slice(0, 32)
   return `reporter:${opaque}`
+}
+
+/** 确认 finding 的稳定 Trigger ID；同一运行和 finding 重试时必须复用它。 */
+export function reporterFindingTriggerId(runId: string, findingId: string): string {
+  const opaque = createHash('sha256').update(`${runId}\0${findingId}`).digest('hex').slice(0, 32)
+  return `reporter:finding:${opaque}`
+}
+
+/** 把确认 finding 送入目标 ProjectSource 的正常 Engine/Intake 链路。 */
+export function reporterFindingTrigger(runId: string, finding: ReporterFinding, project: ReporterProjectIdentity, at: string): Trigger {
+  if (project.id !== project.id.trim() || !project.id) throw new Error('Reporter finding 项目身份无效')
+  const triggerId = reporterFindingTriggerId(runId, finding.finding_id)
+  const threadId = `reporter:finding:${runId}:${finding.finding_id}`
+  const channel = { source: 'local-reporter', thread: `finding:${runId}:${finding.finding_id}`,
+    address: { run_id: runId, finding_id: finding.finding_id, trigger_id: triggerId, project_source_id: project.id } }
+  return { id: triggerId, source: project.id,
+    threads: [{ source: project.id, id: threadId }], actor: { source: project.id, id: '' }, human: false,
+    at: new Date(at).toISOString(), text: `${finding.title}\n\n${finding.body}\n\n证据：\n${finding.evidence}`, channel,
+    meta: { kind: 'conversation', projectSourceId: project.id, provider: project.provider,
+      reporter: { kind: 'finding', confidence: 'confirmed', runId, findingId: finding.finding_id } } }
 }
 
 export function actionText(action: ReporterAction): string {

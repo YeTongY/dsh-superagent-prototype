@@ -301,6 +301,7 @@ export class Runtime extends Service implements SourceHost {
           },
           sessionStatus: sessionId => ctx.agents.get(sessionId as SessionId)?.status ?? 'missing',
           relay: (requestId, text) => sessions.relay(requestId, text),
+          submitFinding: trigger => this.receive(trigger),
           ...(browser ? { browser } : {}), lifetime: this.lifetime, now })
       }
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },

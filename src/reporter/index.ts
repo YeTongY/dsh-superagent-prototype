@@ -5,4 +5,4 @@ export { ReporterScriptStepSchema, reporterAction, runReporterScript } from './s
 export type { ReporterScriptResult, ReporterScriptStep } from './script.ts'
 export { ReporterAutonomousRunError, ReporterAutonomousRunRequestSchema, ReporterAutonomousRuns } from './autonomous.ts'
 export type { ReporterAutonomousHost, ReporterAutonomousManagementView, ReporterAutonomousRunRequest, ReporterAutonomousRunStatus,
-  ReporterAutonomousRunView, ReporterSessionContext } from './autonomous.ts'
+  ReporterAutonomousRunView, ReporterFindingSubmission, ReporterSessionContext } from './autonomous.ts'

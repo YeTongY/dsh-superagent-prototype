@@ -114,7 +114,7 @@ it('requires critical source and screenshot GUI review while leaving investigati
   expect(initialPrompt).toContain('本次已授权截图 GUI。请实际观察截图图像并像真实用户一样操作界面')
   expect(systemPrompt).toContain('主动、挑剔的产品审查者')
   expect(systemPrompt).toContain('结合同项目源码审查与实际截图 GUI 操作')
-  expect(systemPrompt).toContain('静态实现证据本身可以支持候选')
+  expect(systemPrompt).toContain('静态实现证据本身可以支持调查疑点')
   expect(systemPrompt).toContain('一个候选被否定、一个页面或工具受阻')
   expect(systemPrompt).toContain('编排者对单个候选的回复只处理该候选')
   expect(systemPrompt).not.toContain('不要为了格式或清单而读取文件')
@@ -141,7 +141,7 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(run.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })
   expect(host.restrictions.get(run.session_id)).toEqual([{ allow: [] }])
   const reporterTools = [...host.tools.get(run.session_id)!.keys()]
-  expect(reporterTools).toEqual(expect.arrayContaining(['reporter_simulator_feedback', 'reporter_simulate_user_action', 'reporter_candidate', 'reporter_submit_report']))
+  expect(reporterTools).toEqual(expect.arrayContaining(['reporter_simulator_feedback', 'reporter_simulate_user_action', 'reporter_candidate', 'reporter_submit_finding', 'reporter_submit_report']))
   expect(reporterTools).not.toEqual(expect.arrayContaining(['bash', 'pwsh', 'write', 'edit', 'subagent', 'orchestrator_route', 'orchestrator_reporter_reply']))
 
   await host.runTool(run.session_id, 'reporter_candidate', { text: '登录后的设置页返回空白，需要确认是否稳定复现。' })
@@ -176,6 +176,35 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggersBefore)
   expect(runtime.store.tickets.list()).toHaveLength(ticketsBefore)
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get()?.count)).toBe(receiptsBefore)
+})
+
+it('puts a confirmed Reporter finding through the normal Eval and Ticket chain', async () => {
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  host = await startRuntime()
+  const { runtime } = host
+  const run = await runtime.reporterRuns!.start({ idempotency_key: 'confirmed-finding-chain', goal: '确认设置页的窄屏问题',
+    project_source_id: 'github', mode: 'real-service', permissions: { read_only_service: true } })
+  const finding = { finding_id: 'narrow-settings', title: '窄屏设置页裁切内容', body: '在窄视口打开设置页时主要操作区被裁切。', evidence: '源码布局约束与真实截图复现一致。' }
+  const submitted = await host.runTool(run.session_id, 'reporter_submit_finding', finding)
+  expect(submitted).toMatchObject({ finding_id: finding.finding_id, trigger_id: expect.stringMatching(/^reporter:finding:/), disposition: 'stored' })
+  await runtime.idle()
+  const triggerId = submitted.trigger_id as string
+  expect(runtime.store.triggers.get(triggerId)).toMatchObject({ source: 'github', human: false, actor: { id: '' }, meta: { reporter: { kind: 'finding', confidence: 'confirmed' } } })
+  expect(runtime.store.triggers.disposition(triggerId)).toMatchObject({ evalId: expect.any(String) })
+  expect(runtime.store.tickets.list()).toHaveLength(0)
+  await host.runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: triggerId })
+  const accepted = await host.runTool(runtime.masterId, 'orchestrator_eval_decide', {
+    trigger_id: triggerId, decision: 'accept', title: finding.title, worktree_name: 'narrow-settings', scope: finding.body,
+    reason: 'Reporter 已提供可复核的源码和截图证据。', intent_evidence: finding.evidence,
+    acknowledgement: '收到，按正常工单流程处理。',
+    rule_assessments: [{ rule_id: 'copy', matched: false, reason: '不是文案问题' }, { rule_id: 'visual', matched: true, reason: '存在可复核的布局裁切' }],
+    direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: finding.evidence },
+  })
+  expect(accepted).toMatchObject({ decision: 'accept', ticket: { ticket_id: expect.any(String) } })
+  const ticket = runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
+  expect(ticket.origin.triggerId).toBe(triggerId)
+  expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: { via: 'reporter', authority: 'confirmed' } })
 })
 
 it('offers only the current simulation safe projection on demand and advances its sequence with accepted input', async () => {

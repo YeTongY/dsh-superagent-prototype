@@ -169,6 +169,20 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
   const machineGate = (trigger: Trigger): GateResult => {
+    // A confirmed local Reporter finding is an inferred observation, not a user or bot identity. It still enters the
+    // normal Eval/Decision path and is accepted only while the source is listened to and proactive processing is enabled.
+    const reporter = trigger.meta.reporter
+    const finding = reporter && typeof reporter === 'object' ? reporter as Record<string, unknown> : undefined
+    const confirmedFinding = !trigger.human && !trigger.actor.id && trigger.actor.source === trigger.source && trigger.channel?.source === 'local-reporter'
+      && finding?.kind === 'finding' && finding.confidence === 'confirmed'
+      && typeof finding.runId === 'string' && finding.runId.length > 0 && typeof finding.findingId === 'string' && finding.findingId.length > 0
+    if (confirmedFinding) {
+      const scope = listened(sources, trigger.source, trigger.meta)
+      if (!scope.listened) return { admissible: false, reason: 'not_human' }
+      if (mode === 'off') return { admissible: false, reason: 'admission_ignored' }
+      const recorded = { source: trigger.source, scope: trigger.meta, ...scope.row === undefined ? {} : { row: scope.row } }
+      return { admissible: true, strength: 'inferred', basis: { ...recorded, via: 'reporter' as const, authority: 'confirmed' } }
+    }
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
     if (trigger.actor.id && !bot) return { admissible: false, reason: 'not_human' }
     const scope = listened(sources, trigger.source, trigger.meta)
@@ -221,6 +235,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       if (basis.via === 'followup') return mandate.strength === 'explicit' || (mode === 'auto' && rulesOn(basis.rules))
       // A bot's candidate holds only while the bot remains on its Source's bot list and passes the observation checks below.
       if (basis.via === 'bot' && !listedBot(settings, mandate.actor)) return false
+      // Reporter findings remain inferred observations and therefore require proactive evaluation to stay enabled.
+      if (basis.via === 'reporter') return mode === 'auto'
       // An admission-table Mandate holds while the sender's current cell still grants at least the original strength.
       if (basis.via === 'admission') {
         const { cell } = basis

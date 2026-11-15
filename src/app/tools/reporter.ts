@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { LocalReporter } from '../../reporter/local-reporter.ts'
 import { ReporterBrowserActionSchema } from '../../reporter/browser.ts'
 import type { ReporterAutonomousRuns, ReporterSessionContext } from '../../reporter/autonomous.ts'
-import { ReporterActionSchema } from '../../reporter/protocol.ts'
+import { ReporterActionSchema, ReporterFindingSchema } from '../../reporter/protocol.ts'
 import { tool, type Tool } from './tool.ts'
 
 const ProbeSchema = z.enum(['state', 'overview', 'sources', 'tickets', 'threads', 'decisions'])
@@ -11,7 +11,7 @@ export type ReporterReadOnlyProbe = z.infer<typeof ProbeSchema>
 
 export interface ReporterToolsHost {
   readonly reporter: Pick<LocalReporter, 'simulatorFeedback' | 'submit'>
-  readonly runs: Pick<ReporterAutonomousRuns, 'candidate' | 'submitReport' | 'browserDriver'>
+  readonly runs: Pick<ReporterAutonomousRuns, 'candidate' | 'submitFinding' | 'submitReport' | 'browserDriver'>
   waitForTarget(scenarioId: string, signal: AbortSignal): Promise<void>
   probeReadOnly(probe: z.infer<typeof ProbeSchema>, signal: AbortSignal): Promise<{ probe_id: string; status: number; body: string; json: boolean }>
 }
@@ -83,9 +83,15 @@ export function reporterTools(host: ReporterToolsHost, sessionId: string, contex
 
   tools.push(tool({
     name: 'reporter_candidate',
-    description: '把一个需要编排者判断的候选问题、证据或疑问即时发送给 Orchestrator。Orchestrator 可在这个 Reporter Session 中回复；候选本身不授权派工。',
+    description: '把一个尚未确认的调查疑点、证据或疑问即时发送给 Orchestrator。它只是协作假设，不是最终问题或工单；Orchestrator 可在这个 Reporter Session 中回复。',
     schema: z.object({ text: z.string().trim().min(1).max(8_000) }).strict(),
     execute: async args => { host.runs.candidate(sessionId, args.text); return { forwarded: true, run_id: view.id } },
+  }))
+  tools.push(tool({
+    name: 'reporter_submit_finding',
+    description: '提交一个已经确认的问题，让它作为 Reporter observation 进入目标 ProjectSource 的正常 Runtime/Engine/Policy/Eval/Decision/Ticket 链路。只有证据和影响已经明确时才能调用；不要提交不确定、可能或待验证的问题。相同 finding_id 可安全重试，不同内容会被拒绝。',
+    schema: ReporterFindingSchema,
+    execute: async args => host.runs.submitFinding(sessionId, args),
   }))
   tools.push(tool({
     name: 'reporter_submit_report',

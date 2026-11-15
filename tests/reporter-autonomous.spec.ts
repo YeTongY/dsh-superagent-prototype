@@ -31,6 +31,7 @@ function harness() {
     cancelSession: vi.fn(async sessionId => { sessionStates.set(sessionId, 'idle') }),
     sessionStatus: sessionId => sessionStates.get(sessionId) ?? 'idle',
     relay: vi.fn(), lifetime: new AbortController().signal,
+    submitFinding: vi.fn(() => 'stored' as const),
   }
   return { host, saved, sessionStates, reporter }
 }
@@ -54,7 +55,7 @@ describe('Reporter DSH Session projection', () => {
     expect(initialPrompt).toContain('结合同项目源码审查与实际截图 GUI 操作')
     expect(initialPrompt).toContain('具体审查哪个区域、提出什么假设、使用哪些工具以及按什么顺序继续，由你自主判断')
     expect(initialPrompt).toContain('没有实际看到截图图像时，不得称为完成了截图审查')
-    expect(initialPrompt).toContain('静态实现证据本身可以支持一个问题候选')
+    expect(initialPrompt).toContain('静态实现证据本身可以支持调查疑点')
     expect(initialPrompt).toContain('关闭或标记该调查分支后，继续寻找并核验其他有价值的方向')
     expect(initialPrompt).toContain('编排者对单个候选的回复只处理该候选')
     expect(initialPrompt).toContain('同项目只读源码工作区')
@@ -117,6 +118,25 @@ describe('Reporter DSH Session projection', () => {
     expect(vi.mocked(h.host.relay).mock.calls).toHaveLength(reportRelayCount)
     expect(() => runs.candidate(started.session_id, '完成后不能再追加候选')).toThrowError(ReporterAutonomousRunError)
     await expect(runs.reply(started.id, 'too-late', '完成后不能再追问')).rejects.toMatchObject({ code: 'reporter_session_ended' })
+  })
+
+  it('submits only confirmed findings through the Runtime port with stable idempotency', async () => {
+    const runs = new ReporterAutonomousRuns(h.host)
+    const started = await runs.start(request({ mode: 'real-service', permissions: { read_only_service: true } }))
+    const finding = { finding_id: 'settings-overflow', title: '设置页内容溢出', body: '窄视口下保存按钮被裁切。', evidence: '截图和源码布局约束共同确认。' }
+    const first = runs.submitFinding(started.session_id, finding)
+    expect(first).toEqual({ finding_id: finding.finding_id, trigger_id: expect.stringMatching(/^reporter:finding:/), disposition: 'stored' })
+    expect(h.host.submitFinding).toHaveBeenCalledTimes(1)
+    const trigger = vi.mocked(h.host.submitFinding).mock.calls[0]![0]
+    expect(trigger).toMatchObject({ source: 'github', human: false, actor: { source: 'github', id: '' },
+      threads: [{ source: 'github', id: expect.stringContaining('reporter:finding:') }],
+      channel: { source: 'local-reporter' }, meta: { reporter: { kind: 'finding', confidence: 'confirmed', runId: started.id, findingId: finding.finding_id } } })
+    expect(runs.submitFinding(started.session_id, finding)).toEqual(first)
+    expect(h.host.submitFinding).toHaveBeenCalledTimes(1)
+    expect(() => runs.submitFinding(started.session_id, { ...finding, body: '换了一段证据。' })).toThrowError(ReporterAutonomousRunError)
+    expect(() => runs.submitFinding(started.session_id, { ...finding, body: '换了一段证据。' })).toThrowError(/finding_id 已用于不同内容/)
+    await runs.submitReport(started.session_id, '摘要', '已确认设置页溢出问题。')
+    expect(() => runs.submitFinding(started.session_id, { ...finding, finding_id: 'after-report' })).toThrowError(/Reporter Session 已结束/)
   })
 
   it('routes orchestrator replies to the same DSH Session with an idempotent delivery id', async () => {

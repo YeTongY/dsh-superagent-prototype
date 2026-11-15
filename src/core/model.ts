@@ -111,6 +111,8 @@ interface Received { source?: string; scope?: Record<string, unknown>; row?: str
  *   an accept mode;
  * - `listed`: accepted before Mandates recorded their basis, from a sender who must still be on the list; `authority` is
  *   what an earlier version recorded instead.
+ * - `reporter`: a confirmed finding submitted by the local Reporter; it remains an inferred candidate and never represents
+ *   a user's authorization.
  * `sender` names the allowed sender at acceptance time, and `rules` the rules an assessment matched.
  */
 export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
@@ -120,6 +122,8 @@ export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
   | { via: 'listed'; addressed?: 'mention' | 'direct'; observation?: { mode?: AcceptMode }; authority?: string }
   /** A message of a bot on its Source's bot list: an inferred candidate at most, never an explicit request or a stop. */
   | { via: 'bot'; addressed?: 'mention' | 'direct'; observation: { mode: AcceptMode } }
+  /** A confirmed local Reporter finding: an inferred candidate, never a human authorization. */
+  | { via: 'reporter'; authority: 'confirmed' }
 )
 
 /** Immutable authorization produced by an accept decision; execution is bounded by it and it never changes. */
