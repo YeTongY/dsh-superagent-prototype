@@ -69,16 +69,18 @@ export interface AssessorHost {
 export const EvalReadSchema = z.object({
   trigger_id: z.string().min(1).describe('Original candidate ID returned by orchestrator_eval; every reference is scoped to this trigger.'),
   resource: z.enum(['message', 'root', 'parent', 'thread', 'file', 'directory', 'image']),
-  path: z.string().optional().describe('Repository-relative path, only for file/directory.'),
-  message_id: z.string().optional().describe('Only for message: omit for the trigger, or the id of a window message or stub.'),
-  cursor: z.string().optional().describe('Only for thread: omit on the first page, then the next_cursor of the window or the cursor of next_read. Never a thread or message ID.'),
-  image_id: z.string().optional().describe('Only for image: an image id the window or a read lists.'),
+  path: z.string().nullish().describe('Repository-relative path, only for file/directory.'),
+  message_id: z.string().nullish().describe('Only for message: omit for the trigger, or the id of a window message or stub.'),
+  cursor: z.string().nullish().describe('Only for thread: omit on the first page, then the next_cursor of the window or the cursor of next_read. Never a thread or message ID.'),
+  image_id: z.string().nullish().describe('Only for image: an image id the window or a read lists.'),
   offset: z.number().int().min(0).default(0).describe('Text pagination: copy next_offset; keep the other arguments unchanged. Images use 0.'),
 }).strict().superRefine((read, ctx) => {
-  if ((read.resource === 'file' || read.resource === 'directory') !== (read.path !== undefined)) ctx.addIssue({ code: 'custom', message: 'path is required only for file/directory. To read the source/root/parent, use resource=message/root/parent without a path.' })
-  if (read.message_id !== undefined && read.resource !== 'message') ctx.addIssue({ code: 'custom', message: 'message_id is only for message; use returned image_id for images.' })
-  if (read.cursor !== undefined && read.resource !== 'thread') ctx.addIssue({ code: 'custom', message: 'cursor is only for thread. First page: {resource:"thread"}.' })
-  if ((read.resource === 'image') !== (read.image_id !== undefined)) ctx.addIssue({ code: 'custom', message: 'Images require image_id from a returned read reference. Read the thread or root first to discover their images.' })
+  // 原生会话中观察到可选字符串字段会以空字符串出现；空值按未提供处理，非空错配仍拒绝。
+  const supplied = (value: string | null | undefined) => typeof value === 'string' && value.length > 0
+  if ((read.resource === 'file' || read.resource === 'directory') !== supplied(read.path)) ctx.addIssue({ code: 'custom', message: 'path is required only for file/directory. To read the source/root/parent, use resource=message/root/parent without a path.' })
+  if (supplied(read.message_id) && read.resource !== 'message') ctx.addIssue({ code: 'custom', message: 'message_id is only for message; use returned image_id for images.' })
+  if (supplied(read.cursor) && read.resource !== 'thread') ctx.addIssue({ code: 'custom', message: 'cursor is only for thread. First page: {resource:"thread"}.' })
+  if ((read.resource === 'image') !== supplied(read.image_id)) ctx.addIssue({ code: 'custom', message: 'Images require image_id from a returned read reference. Read the thread or root first to discover their images.' })
 })
 /** Validated arguments for `MasterAssessor.read`. */
 export type EvalRead = z.infer<typeof EvalReadSchema>
@@ -242,7 +244,7 @@ export class MasterAssessor implements Assessor {
         const key = read.image_id!.slice(read.image_id!.indexOf('/') + 1)
         return source.image(agent, commands, image, key, this.host.deployment.stateDir, signal)
       }
-      const cacheKey = JSON.stringify([read.resource, read.path, read.cursor, read.message_id])
+      const cacheKey = JSON.stringify([read.resource, read.path || undefined, read.cursor || undefined, read.message_id || undefined])
       if (read.offset > 0) {
         const cached = snapshots.get(cacheKey)
         if (cached === undefined) throw new Error('Read this resource at offset 0 first')
@@ -251,14 +253,15 @@ export class MasterAssessor implements Assessor {
       let body: string
       const source = this.host.threadContext(trigger)
       if (read.resource === 'message') {
-        const message = messages.get(read.message_id ?? source?.messageId ?? '')
+        const message = messages.get(read.message_id || source?.messageId || '')
         if (message === undefined) throw new Error('Unknown message reference. Use resource=root/parent or read the thread first; copy a returned message read call.')
         body = message
       }
       else if (read.resource === 'thread' || read.resource === 'root' || read.resource === 'parent') {
         if (!source) throw new Error(NO_CONTEXT)
-        if (read.cursor !== undefined && !cursors.has(read.cursor)) throw new Error('Unknown thread cursor. First call {resource:"thread"}; then copy the returned next_read exactly.')
-        const result = await source.read(commands, read.resource, read.cursor)
+        const cursor = read.cursor || undefined
+        if (cursor !== undefined && !cursors.has(cursor)) throw new Error('Unknown thread cursor. First call {resource:"thread"}; then copy the returned next_read exactly.')
+        const result = await source.read(commands, read.resource, cursor)
         const references = result.messages.filter(message => !message.deleted).flatMap(message => {
           messages.set(message.id, message.text)
           return this.imageReferences(source, trigger, message.text, message.id, cache)

@@ -1,6 +1,7 @@
 /** Main-session assessor per-eval state and context loading. */
 import { expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { z } from 'zod'
 import { AssessmentSchema, EvalReadSchema, MasterAssessor, type AssessorHost } from '../src/app/assessment.ts'
 import { mainAdmissionPolicy } from '../src/app/context.ts'
 import { Engine, MemoryRepositories, type Executor, type Policy, type Trigger } from '../src/core/index.ts'
@@ -30,7 +31,8 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
     run: vi.fn(async () => 'export const value = 1\n'),
     // A string first argument is a raw file path; otherwise validate the fake gh response against the schema.
     api: vi.fn(async (schema: unknown, ...rest: string[]) => typeof schema === 'string' ? 'export const value = 1\n'
-      : (schema as { parse(value: unknown): unknown }).parse(await (commands as unknown as { gh(args: string[]): Promise<unknown> }).gh(['api', rest[0]!]))),
+      : (schema as { parse(value: unknown): unknown }).parse(rest[0] === 'contents/' ? [{ name: 'README.md' }, { name: 'src' }]
+        : await (commands as unknown as { gh(args: string[]): Promise<unknown> }).gh(['api', rest[0]!]))),
   } as unknown as Commands
   const repo = new MemoryRepositories()
   const sources = new SourceRegistry(() => SettingsSchema.parse({}))
@@ -57,7 +59,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   // Per-Eval state retained by the assessor and released when the Eval ends.
   const kept = assessor as unknown as { evals: Map<string, unknown> }
   const size = () => kept.evals.size
-  return { repo, engine, assessor, tools, size, gate }
+  return { repo, engine, assessor, commands, tools, size, gate }
 }
 const issue = (n: number): Trigger => ({ id: `issue-${n}`, source: 'github', threads: [{ source: 'github', id: String(n) }], actor: { source: 'github', id: 'bob' }, human: true,
   at: new Date(Date.UTC(2026, 8, 9, 0, 0, n)).toISOString(), text: `issue ${n}`, url: `https://github.com/acme/widgets/issues/${n}`, meta: { number: n } })
@@ -110,6 +112,43 @@ it('reads the context of a Trigger through its Source, and none for a Source tha
   // The Trigger's own text is still readable when its Source provides no Thread context.
   expect(await s.tools.orchestrator_eval_read!({ trigger_id: 'other-2', resource: 'message', offset: 0 },
     signal)).toMatchObject({ text: 'issue 2' })
+})
+it('treats empty optional DSH read fields as omitted while keeping resource checks strict', async () => {
+  const s = setup()
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+
+  const result = await s.tools.orchestrator_eval_read!({ trigger_id: 'issue-1', resource: 'file', path: 'src/value.ts', offset: 0,
+    message_id: '', cursor: '', image_id: '' }, signal)
+  expect(result).toMatchObject({ text: 'export const value = 1\n' })
+  expect(s.commands.api).toHaveBeenCalledWith('contents/src/value.ts', '-H', 'Accept: application/vnd.github.raw')
+  expect(await s.tools.orchestrator_eval_read!({ trigger_id: 'issue-1', resource: 'file', path: 'src/value.ts', offset: 1,
+    message_id: null, cursor: null, image_id: null }, signal)).toMatchObject({ text: 'xport const value = 1\n' })
+
+  for (const args of [
+    { trigger_id: 'issue-1', resource: 'file', path: 'src/value.ts', message_id: null, cursor: null, image_id: null },
+    { trigger_id: 'issue-1', resource: 'file', path: 'src/value.ts', message_id: '', cursor: '', image_id: '' },
+  ]) expect(EvalReadSchema.safeParse(args).success).toBe(true)
+
+  expect(EvalReadSchema.safeParse({ trigger_id: 'issue-1', resource: 'file', path: 'src/value.ts', message_id: 'm-1' }).success).toBe(false)
+  expect(EvalReadSchema.safeParse({ trigger_id: 'issue-1', resource: 'thread', cursor: 'next', image_id: 'img-1' }).success).toBe(false)
+  expect(EvalReadSchema.safeParse({ trigger_id: 'issue-1', resource: 'file', path: '' }).success).toBe(false)
+  expect(EvalReadSchema.safeParse({ trigger_id: 'issue-1', resource: 'image', image_id: '' }).success).toBe(false)
+  expect(EvalReadSchema.safeParse({ trigger_id: 'issue-1', resource: 'thread', path: '', cursor: '' }).success).toBe(true)
+  expect(EvalReadSchema.safeParse({ trigger_id: 'issue-1', resource: 'thread', path: 'src/value.ts' }).success).toBe(false)
+})
+it('serializes the DSH read schema and keeps an explicit repository-root directory read available', async () => {
+  const parameters = JSON.parse(JSON.stringify(z.toJSONSchema(EvalReadSchema))) as {
+    properties: Record<string, { anyOf?: { type: string }[] }>
+  }
+  for (const field of ['path', 'message_id', 'cursor', 'image_id']) {
+    expect(parameters.properties[field]?.anyOf?.map(item => item.type)).toEqual(['string', 'null'])
+  }
+
+  const s = setup()
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  const root = await s.tools.orchestrator_eval_read!({ trigger_id: 'issue-1', resource: 'directory', path: '.' }, signal)
+  expect(root).toMatchObject({ text: 'README.md\nsrc' })
+  expect(s.commands.api).toHaveBeenCalledWith(expect.anything(), 'contents/')
 })
 it('routes an explicit candidate instead of assessing it: each eval tool names the routing tools', async () => {
   const s = setup('explicit')
