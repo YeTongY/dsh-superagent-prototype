@@ -97,6 +97,18 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
   return { data: state.data, error: state.error, reload }
 }
 
+/** Rebuild the visible list prefix, following server offsets when its page cap is smaller than the requested count. */
+export async function loadList<T>(load: (query: { limit: number; offset?: number }) => Promise<{ items: T[]; next_offset: number | null }>,
+  limit: number) {
+  let page = await load({ limit })
+  const items = [...page.items]
+  while (page.next_offset !== null && items.length < limit) {
+    page = await load({ limit: limit - items.length, offset: page.next_offset })
+    items.push(...page.items)
+  }
+  return { items, next_offset: page.next_offset }
+}
+
 export const DECISION_FILTERS = ['work', 'stop', 'ignore', 'unavailable', 'all'] as const
 export type DecisionFilter = typeof DECISION_FILTERS[number]
 export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 'accept,reopen', stop: 'stop', ignore: 'ignore',

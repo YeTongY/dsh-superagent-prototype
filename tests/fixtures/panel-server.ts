@@ -8,7 +8,7 @@ import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
-import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
+import type { DecisionRow, DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
@@ -92,6 +92,7 @@ export interface PanelServer {
   reporter: ApiResponse<'GET reporter'>
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
+  decisions: DecisionRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
@@ -259,7 +260,7 @@ function initial(): PanelServer {
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
     tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() },
-    threads: [threadSummary()], threadPages: threadPage,
+    threads: [threadSummary()], decisions: [acceptDecision()], threadPages: threadPage,
     person: [ticketSummary({ attention: { id: 'q1', question: '需要确认按钮颜色' }, note: { text: '需要确认按钮颜色', error: false }, reply },
       { stage: 'person', action: 'answer' }),
       ticketSummary({ id: 't4', title: '截图工具', actions: { retry: true, stop: true }, sessionId: 'worker-t4',
@@ -287,7 +288,13 @@ interface Request<K extends keyof Api> { params: RouteParams<K>; query: Partial<
 type Answer<K extends keyof Api> = ApiResponse<K> | Refusal
 type Route<K extends keyof Api> = { query?: readonly Query<K>[]; answer: (request: Request<K>) => Answer<K> | Promise<Answer<K>> }
   & (Api[K] extends { body: unknown } ? { body: true } : { body?: never })
-const page = <T>(items: T[]) => ({ items, total: items.length, next_offset: null })
+const page = <T>(items: T[], query: { offset?: string; limit?: string }, fallback: number, cap: number) => {
+  const requestedOffset = Number(query.offset), requestedLimit = Number(query.limit)
+  const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 ? requestedOffset : 0
+  const limit = Math.min(cap, Number.isInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : fallback)
+  return { items: items.slice(offset, offset + limit), total: items.length,
+    next_offset: offset + limit < items.length ? offset + limit : null }
+}
 const ticketOf = (id: string) =>
   [...server.tickets.open, ...server.person, ...server.tickets.ended].find(ticket => ticket.id === id) ?? server.ticketDetails[id]
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
@@ -310,7 +317,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     const added = Object.values(server.joining ?? {}); server.joined = { ...server.joined, ...server.joining }; server.joining = undefined
     return { added }
   } },
-  'GET threads': { query: ['filter', 'offset', 'limit'], answer: () => page(server.threads) },
+  'GET threads': { query: ['filter', 'offset', 'limit'], answer: ({ query }) => page(server.threads, query, 20, 1000) },
   'GET threads/:key': { query: ['limit', 'before', 'around'], answer: ({ params, query }) => {
     const found = server.threadPages(params.key, query)
     if (!found) return refuse(404, 'Thread not found')
@@ -324,12 +331,14 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { removed, thread: params.key, context_delivery: 'injected' }
   } },
   'POST triggers/:id/requeue': { answer: ({ params }) => { server.queued.add(params.id); return { queued: true } } },
-  'GET decisions': { query: ['kind', 'window', 'offset', 'limit'], answer: ({ query }) =>
-    ({ items: query.kind === 'ignore' ? [] : [acceptDecision()], next_offset: null }) },
+  'GET decisions': { query: ['kind', 'window', 'offset', 'limit'], answer: ({ query }) => {
+    const { items, next_offset } = page(query.kind === 'ignore' ? [] : server.decisions, query, 30, 200)
+    return { items, next_offset }
+  } },
   'POST decisions/:id/dismiss': { answer: ({ params }) => params.id === 'u1' ? { dismissed: true } : refuse(404,
     'Unavailable Eval not found') },
   'GET tickets': { query: ['state', 'offset', 'limit'], answer: ({ query }) => page(server.tickets[query.state === 'ended' ? 'ended'
-    : 'open']) },
+    : 'open'], query, 20, 1000) },
   'GET tickets/:id': { answer: ({ params }) => server.ticketDetails[params.id] ?? refuse(404, 'Ticket not found') },
   'POST tickets/:id/retry': { answer: ({ params }) => {
     const ticket = ticketOf(params.id)
