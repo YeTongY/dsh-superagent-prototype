@@ -388,6 +388,24 @@ describe('policy effects', () => {
     const explicitFollowup = ticket('t6', { ...followup.mandate, strength: 'explicit', actor: { source: 'feishu', id: 'ou_alice' } })
     expect(settingsPolicy(mode('off'), scope()).revalidate(explicitFollowup.mandate)).toBe(true)
   })
+  it('revalidates every matched Reporter rule without changing rule-disable notices for live tickets', () => {
+    const auto = { ...base, eval: { ...base.eval, mode: 'auto' as const } }
+    const reporter = ticket('reporter', { strength: 'inferred', actor: { source: 'feishu', id: '' }, scope: '',
+      basis: { via: 'reporter', authority: 'confirmed', source: 'feishu', scope: { chatId: CHAT }, rules: ['copy', 'visual'] } })
+    expect(settingsPolicy(auto, scope()).revalidate(reporter.mandate)).toBe(true)
+    for (const id of ['copy', 'visual']) {
+      for (const deleted of [false, true]) {
+        const rules = deleted ? auto.policy.rules.filter(rule => rule.id !== id)
+          : auto.policy.rules.map(rule => ({ ...rule, enabled: rule.id !== id }))
+        const changed = { ...auto, policy: { ...auto.policy, rules } }
+        expect(settingsPolicy(changed, scope()).revalidate(reporter.mandate)).toBe(false)
+        expect(policyEffects([reporter], auto, changed, scope).get(reporter.id))
+          .toEqual({ rules: [{ id, name: auto.policy.rules.find(rule => rule.id === id)!.name, change: 'disabled' }] })
+        const unmatched = { ...reporter.mandate, basis: { ...reporter.mandate.basis, rules: [id === 'copy' ? 'visual' : 'copy'] } }
+        expect(settingsPolicy(changed, scope()).revalidate(unmatched)).toBe(true)
+      }
+    }
+  })
   it('revokes an inferred ticket whose cell weakens or whose candidates no longer become work, and reports a deleted rule disabled', () => {
     const chat = 'oc_1111111111111111111111111111'
     const table = (cell: 'inferred' | 'ignore', mode: 'auto' | 'observe' = 'auto') => SettingsSchema.parse({ ...base, eval: { ...base.eval, mode },
