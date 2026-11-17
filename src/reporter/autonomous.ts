@@ -9,16 +9,19 @@ import type { LocalReporter } from './local-reporter.ts'
 import { ReporterFindingSchema, reporterFindingTrigger, stableJson, type ReporterProjectIdentity } from './protocol.ts'
 
 const projectSourceId = z.string().regex(/^[a-z][a-z0-9-]{0,99}$/)
-
-export const ReporterAutonomousRunRequestSchema = z.object({
-  idempotency_key: z.string().trim().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
-  goal: z.string().trim().min(1).max(4_000),
-  project_source_id: projectSourceId,
-  mode: z.enum(['simulation', 'real-service', 'browser', 'both']),
-  permissions: z.object({ simulation: z.boolean().default(false), read_only_service: z.boolean().default(false), browser: z.boolean().default(false) })
+const reporterRunFields = {
+  goal: z.string().trim().min(1).max(4_000).describe('忠实概括原始人类请求和已给出的范围，不添加用户未要求的工作。'),
+  mode: z.enum(['simulation', 'real-service', 'browser', 'both']).describe('选择此次自主审查的主要交互方式。'),
+  permissions: z.object({
+    simulation: z.boolean().default(false).describe('允许通过 LocalReporter/Runtime/Engine 模拟用户动作。'),
+    read_only_service: z.boolean().default(false).describe('允许调用固定的只读服务探测。'),
+    browser: z.boolean().default(false).describe('允许在受限的真实 GUI 中观察和交互。'),
+  })
     .strict().prefault({}),
-  ticket_id: z.string().trim().min(1).max(200).optional(),
-}).strict().superRefine((request, context) => {
+  ticket_id: z.string().trim().min(1).max(200).optional().describe('仅当原请求已关联同项目执行工单时提供；服务端会校验其项目归属。'),
+}
+function validateReporterRunPermissions(request: { mode: 'simulation' | 'real-service' | 'browser' | 'both'; permissions: { simulation: boolean; read_only_service: boolean; browser: boolean } },
+  context: z.RefinementCtx) {
   if (!request.permissions.simulation && !request.permissions.read_only_service && !request.permissions.browser) {
     context.addIssue({ code: 'custom', path: ['permissions'], message: '至少需要一种明确的测试权限' })
   }
@@ -34,8 +37,15 @@ export const ReporterAutonomousRunRequestSchema = z.object({
   if (request.mode === 'both' && (!request.permissions.simulation || !request.permissions.read_only_service)) {
     context.addIssue({ code: 'custom', path: ['permissions'], message: 'both 模式需要同时明确授权仿真和只读服务检查' })
   }
-})
+}
+export const ReporterAutonomousRunStartSchema = z.object(reporterRunFields).strict().superRefine(validateReporterRunPermissions)
+export const ReporterAutonomousRunRequestSchema = z.object({
+  idempotency_key: z.string().trim().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+  project_source_id: projectSourceId,
+  ...reporterRunFields,
+}).strict().superRefine(validateReporterRunPermissions)
 export type ReporterAutonomousRunRequest = z.infer<typeof ReporterAutonomousRunRequestSchema>
+export type ReporterAutonomousRunStartRequest = z.infer<typeof ReporterAutonomousRunStartSchema>
 
 export type ReporterAutonomousRunStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
 export interface ReporterAutonomousRunView {
@@ -222,7 +232,7 @@ export class ReporterAutonomousRuns {
     const candidateId = `candidate-${digest({ runId: record.view.id, text }).slice(0, 24)}`
     this.host.relay(`reporter-candidate:${record.view.id}:${candidateId}`, reporterMessage(record, `待验证调查分支 ${candidateId}`, [
       `candidate_id：${candidateId}`,
-      '状态：investigating（调查中）。这是一条协作消息，不是已确认问题或工单；Reporter 会在当前 DSH Session 继续围绕同一分支调查。',
+      '状态：investigating（调查中）。这是一条协作消息，不是 Trigger、用户授权、已确认问题或工单；若是未确认疑点，Reporter 会在当前 DSH Session 继续调查同一分支；若是执行依赖，则继续其他可行方向，并在 Worker 结果返回后核验该分支。',
       '',
       text,
     ].join('\n')))
@@ -304,10 +314,10 @@ export class ReporterAutonomousRuns {
       `目标：\n${request.goal}`,
       `目标 ProjectSource：${request.project_source_id}`,
       `本次授权能力：${capabilities.length ? capabilities.join('、') : '无'}`,
-      request.ticket_id ? `同项目只读源码工作区：执行工单 ${request.ticket_id}，目录已绑定到当前 DSH Workspace。主动审查实现和相关测试，根据线索扩展到关联调用路径、组件和失败处理；具体检查范围由你决定，不要只停留在单个文件表面。` : '本次未绑定同项目代码工作区；说明无法直接审查源码的限制，并继续已授权的截图 GUI 或其他调查。',
+      request.ticket_id ? `同项目只读源码工作区：执行工单 ${request.ticket_id}，目录已绑定到当前 DSH Workspace。主动审查实现和相关测试，根据线索扩展到关联调用路径、组件和失败处理；具体检查范围由你决定，不要只停留在单个文件表面。` : '本次未绑定同项目代码工作区。不要把缺少源码目录或命令权限当作正常收尾理由；若源码访问、运行命令或构建结果是继续目标所必需的，通过 reporter_candidate 向编排者提出具体执行请求，说明目的和需要的 Worker 结果。编排者会依据原始人类请求决定是否用现有工单链路派给 Worker，并经当前 Session 回传结果；relay 不是工单或用户授权。你不能自行执行、派工、指定路径或假称已读取源码。与此同时继续所有可行的调查方向，不要求用户重发请求。',
       request.permissions.browser ? '本次已授权截图 GUI。请实际观察截图图像并像真实用户一样操作界面；仅有可访问性树或文本快照不算完成截图审查。' : '本次未授权截图 GUI，不能声称已查看截图或完成 GUI 审查；如实说明，并继续源码与其他已授权方向。',
       '只能使用本 Session 实际提供的工具和权限。不得修改文件、执行 shell、改变项目或工单状态、创建执行工单或指挥 Worker。仿真动作必须等待并依据 Superagent 的真实反馈，不得编造回复。',
-      '发现未确认疑点时，使用 reporter_candidate 将它作为待验证调查分支发送给编排者协作。工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true。调用后必须继续在当前 DSH Session 围绕这个同一分支调查、复现和核验证据，不能因为已 relay 就等待批准、改查别的问题或结束审查。编排者决定候选是否值得派工；编排者对单个候选的回复只处理该候选，可以提供证据或意见，但不替代核验。单个候选被否决或暂不派工不代表本轮审查结束。',
+      '发现未确认疑点，或缺少源码/命令等执行依赖时，使用 reporter_candidate 协作：疑点作为待验证分支；执行依赖说明目的和需要的 Worker 结果。工具返回稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true。疑点 relay 后继续在当前 DSH Session 调查同一分支；执行依赖 relay 后继续其他可行方向，并在收到 Worker 结果后核验该分支。不能因 relay 而等待用户、要求重发或结束。编排者只能按原始人类授权派发 Worker，relay 不是 Trigger、授权或工单；结果经当前 Session 回传。不得声称读过未绑定的 Worker 目录。编排者回复只处理当前分支，提供意见或证据，不替代你的核验。',
       '只有证据、影响和复现/源码依据已经足够明确的问题，才使用 reporter_submit_finding 提交 confirmed finding，让它进入正常工单链路；该工具不接受不确定置信度。已排除的分支不作为问题；确实受阻的分支只能作为未确认背景说明，不能作为问题结论。',
       '仅当你已尽力调查当前可用的源码和截图 GUI 方向、没有未完成的调查分支且没有其他合理且可验证的疑点可继续时，才提交最终报告。最终“发现的问题”只能包含已经成功提交的 confirmed finding。报告长度和组织由你决定，不需要 JSON、固定模板、最少发现数或文件清单。完整对话由当前 DSH Session 保存。',
     ].filter(Boolean).join('\n\n')

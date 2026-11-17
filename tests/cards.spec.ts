@@ -38,8 +38,8 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A stop goes through orchestrator_route, not through an assessment', 'admission', [], ['decision=stop']],
   // A follow-up has one decider, the worker of the ticket it reached; the main Session only stops the work on a person's request.
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'orchestrator',
-    ['普通来源在工单关注的线程中收到的人类消息会送达相关 Worker', '消息可能恢复工单',
-      '标记 `conversation_first` 的飞书人类消息始终先交给你判断'],
+    ['普通来源的关注线程会把人类消息送到相关 Worker', '非该人停止的已结束工单可能恢复',
+      '`conversation_first` 飞书先交你处理'],
     ['arrive to you as candidates too', 'dispatch says when it needs a tool call']],
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'dispatch',
     ['A follow_up notice reports a person\'s message that already reached the workers it lists', 'do not forward it a second time',

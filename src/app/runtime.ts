@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, latestReport, liveTicket, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, UserError, key, reasonText, latestReport, liveTicket, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -40,7 +40,7 @@ import { pullEndNotices } from '../sources/github-pull.ts'
 import { gitlabMergeRequestEndNotices } from '../sources/gitlab-pull.ts'
 import { createLocalReporter, type LocalReporter } from '../reporter/local-reporter.ts'
 import { reporterTriggerId, type ReporterRuntimeSnapshot } from '../reporter/protocol.ts'
-import { ReporterAutonomousRuns, type ReporterAutonomousHost } from '../reporter/autonomous.ts'
+import { ReporterAutonomousRunError, ReporterAutonomousRuns, type ReporterAutonomousHost, type ReporterAutonomousRunStartRequest } from '../reporter/autonomous.ts'
 import { createReporterBrowserDriver, ReporterBrowserError, type ReporterScreenshotAttacher } from '../reporter/browser.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
@@ -316,6 +316,15 @@ export class Runtime extends Service implements SourceHost {
         },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         ...(this.reporterRuns ? { replyReporter: (runId: string, replyId: string, text: string) => this.reporterRuns!.reply(runId, replyId, text) } : {}),
+        startReporter: async (triggerId: string, request: ReporterAutonomousRunStartRequest) => {
+          if (!this.reporterRuns) throw new ReporterAutonomousRunError(404, 'reporter_disabled', '自主 Reporter 未启用')
+          const trigger = store.triggers.get(triggerId)
+          if (!trigger?.human || engine.candidate(triggerId)?.strength !== 'explicit') throw new UserError('notExplicit')
+          const project = projectForTrigger(setup.deployment, trigger)
+          const projectSource = project?.id ?? (!setup.deployment.projects && setup.deployment.repository ? 'github' : undefined)
+          if (!projectSource) throw new UserError('notAdmissible', { reason: 'the Trigger has no configured ProjectSource' })
+          return this.reporterRuns!.start({ ...request, idempotency_key: key('reporter-review', triggerId), project_source_id: projectSource })
+        },
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {

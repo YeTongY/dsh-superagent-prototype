@@ -83,7 +83,7 @@ export function reporterTools(host: ReporterToolsHost, sessionId: string, contex
 
   tools.push(tool({
     name: 'reporter_candidate',
-    description: '把一个尚未确认的调查疑点作为待验证分支即时 relay 给 Orchestrator。成功后返回稳定 candidate_id 和 investigating 状态；你必须继续在当前 Reporter Session 围绕同一分支调查、复现和核验证据，不能因已 relay 就等待批准、改查别的问题或结束审查。它不是最终问题或工单；只有确认后才能调用 reporter_submit_finding 进入正常工单链路。Orchestrator 可提供协作意见，但回复不能替代你的核验。',
+    description: '把尚未确认的调查疑点，或缺少同项目源码/需要运行命令等真实执行依赖，作为协作请求即时 relay 给 Orchestrator。执行请求要说明目的和希望 Worker 返回的实际结果。成功后返回稳定 candidate_id 和 investigating 状态；你必须继续在当前 Reporter Session 做所有仍可行的调查，不能因已 relay 就等待用户、要求用户重发、改查无关方向或结束审查。它不是最终问题、Trigger、用户授权或工单；只有确认问题后才能调用 reporter_submit_finding。Orchestrator 可基于原始人类 Trigger 用现有路由创建有明确目的的真实 Worker 任务，并通过现有回信返回 Worker 结果；不能把 Worker 目录说成已直接挂载给你。',
     schema: z.object({ text: z.string().trim().min(1).max(8_000) }).strict(),
     execute: async args => ({ forwarded: true, run_id: view.id, ...host.runs.candidate(sessionId, args.text) }),
   }))

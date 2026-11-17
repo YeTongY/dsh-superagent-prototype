@@ -57,6 +57,18 @@ it('assembles every role from fixed sections around the team sections, whatever 
   expect(composePrompt(config, 'worker')).not.toContain(mainAdmissionPolicy)
 })
 
+it('routes open-ended discovery to Reporter before Worker and preserves Feishu authorization for later execution', () => {
+  expect(masterPrompt).toContain('Worker 负责已明确缺陷的调查和实施')
+  expect(masterPrompt).toContain('开放式审查、测试或查找未知问题先启 Reporter')
+  expect(masterPrompt).toContain('即使要求发现后修复，也先由 Reporter 确认')
+  expect(masterPrompt).toContain('飞书审查无需 Worker 时，用启动返回的 trigger_id 经 `orchestrator_reply purpose=answer`')
+  expect(masterPrompt).toContain('需派 Worker 就保留 Trigger，不能先 answer/clarify')
+  expect(masterPrompt).toContain('开放审查仍先 Reporter')
+  expect(guides.dispatch).toContain('仅凭仍有效的原始 Trigger 授权')
+  expect(guides.dispatch).toContain('relay 不授权')
+  expect(guides.dispatch).toContain('可能派 Worker 的飞书审查先保留 Trigger')
+})
+
 it('reads a prompt file whatever its line ends and blank lines, and names a missing or empty one', () => {
   const dir = mkdtempSync(join(tmpdir(), 'prompt-file-'))
   // promptFile resolves paths relative to prompts/; use a relative path to reach the temp dir.

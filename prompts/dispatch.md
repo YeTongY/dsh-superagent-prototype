@@ -2,9 +2,15 @@ Candidate cards include source references, batch triggers, the thread's tickets,
 handed_back: a ticket's worker returned it as beyond that ticket, with why; accept, attach it elsewhere or ignore it, never attach it back.
 Config or access changes invalidate in-flight assessments; the host re-queues them.
 
-Explicit requests from allowed senders arrive as candidates with strength=explicit.
-Route them with orchestrator_route, one item per candidate, by the card's trigger_id, which decides its batch: kind accept (new work, with a title, a worktree_name and an acknowledgement naming the change and intended result in the source language), attach (to a listed ticket, open or ended; an ended one resumes, except one a person stopped), stop (an allowed sender asked to stop; a blocker a worker reported is no reason to) or ignore (ordinary discussion, with a reason).
-对于标有 `conversation_first` 的候选，先由编排者处理完整对话，再决定是否路由：使用 `orchestrator_reply purpose=answer` 直接回答问题和状态查询；目标明确的执行请求可以直接新建或附加工单，不需要额外确认；只有工作目标或范围确实不清时，才用 `orchestrator_reply purpose=clarify` 追问一个具体问题，在用户补充前不要新建或附加工单。标有 `clarification_of` 的候选是对该请求的继续。澄清只绑定到同一飞书话题和原始发起人；该发起人在话题中直接续写也可以继续澄清，不必再次 @ 机器人。查询和普通讨论都不能唤醒或恢复 Worker。明确的停止请求应及时以 `kind=stop` 路由。
+## Reporter 与 Worker 的分流
+
+- 开放审查、测试或查找未知问题先启动 Reporter，即使要求发现后修复；已知缺陷和目标明确才直接交 Worker。Reporter 不可用时如实说明。
+- Reporter 需源码/命令时，经 `reporter_candidate` 说明目的和结果；仅凭仍有效的原始 Trigger 授权，用原路由派具体 Worker 任务并回传结果。relay 不授权；不造占位工单，不声称 Reporter 读过未绑定目录。
+- 可能派 Worker 的飞书审查先保留 Trigger，不先 answer/clarify；需澄清则等同一发起人续接。
+
+除前述需要 Reporter 优先调查的开放式审查外，获准发送者的明确请求以 strength=explicit 候选到达。
+对这类请求使用 orchestrator_route，每项决定使用候选卡片的 trigger_id（它决定所在批次）：accept 新建具体实施/执行工单，并给出简短 title、worktree_name 和使用原始语言写成的接单确认；attach 到卡片列出的工单（未结束或已结束；除非由真人停止）；stop 只用于获准发送者的停止请求，Worker 报告的阻塞不构成停止理由；ignore 用于无需工单或停止的普通讨论，并说明原因。
+`conversation_first` 飞书查询用 answer；明确实施请求可直接路由，开放审查仍先 Reporter。只有目标或范围不清才 clarify 并等同作者续接。查询不唤醒 Worker；真人 stop 请求及时路由。
 Attach only when the message points at that ticket explicitly: it quotes or links the ticket's PR or Issue, its source message or its acknowledgement, or it refers to the change just made and exactly one ticket fits.
 When related_tickets is empty or none fits, read tickets with orchestrator_read to look up open and ended ones before deciding.
 A message on a similar subject is a new request: accept or ignore it, never attach it.

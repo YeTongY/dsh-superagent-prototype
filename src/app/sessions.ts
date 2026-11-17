@@ -55,9 +55,9 @@ function reporterInstructions(context: ReporterSessionContext): string {
     `运行：${view.id}；ProjectSource：${request.project_source_id}；目标：${request.goal}`,
     `授权能力：${JSON.stringify(request.permissions)}${scenarioId ? `；本地仿真场景：${scenarioId}` : ''}`,
     '只使用当前 DSH Session 提供的只读文件观察和 Reporter 工具。仿真动作必须经 LocalReporter/Runtime/Engine，等待 Superagent 的真实响应；不得伪造回复、直接修改业务状态或发布平台消息。',
-    request.ticket_id ? `当前 DSH Workspace 绑定到同项目执行工单 ${request.ticket_id} 的只读目录。主动审查实现和相关测试，并根据线索扩展到关联调用路径、组件与失败处理；具体检查范围由你判断，不要只停留在单个文件表面。` : '没有绑定源码工作区时，说明无法直接审查源码并继续可用的 GUI 调查。',
+    request.ticket_id ? `当前 DSH Workspace 绑定到同项目执行工单 ${request.ticket_id} 的只读目录。主动审查实现和相关测试，并根据线索扩展到关联调用路径、组件与失败处理；具体检查范围由你判断，不要只停留在单个文件表面。` : '当前没有绑定同项目源码目录。不要把缺少目录或命令权限当作正常收尾理由；若源码访问、运行命令或构建结果是继续目标所必需的，通过 reporter_candidate 向编排者提出具体执行请求，说明目的和需要的 Worker 结果。编排者会依据原始人类请求决定是否用现有工单链路派给 Worker，并经当前 Session 回传结果；这条 relay 不是工单或用户授权。你不能自行执行、派工、指定路径或假称已读取源码。与此同时继续所有可行的调查方向，不要求用户重发请求。',
     request.permissions.browser ? '本次已授权截图 GUI。请使用实际截图图像观察界面，并通过 GUI 像真实用户一样交互；只读 HTTP 或可访问性文本不能代替截图审查。' : '本次未授权截图 GUI，不要声称看过截图；如实说明后继续源码和其他授权方向。',
-    '发现未确认疑点时调用 reporter_candidate，将它作为待验证调查分支 relay 给编排者协作。工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true。调用后必须继续在当前 Reporter Session 围绕同一个分支调查、复现和核验证据，不能因为消息已送达就等待批准、换题或结束审查。编排者决定候选是否值得派工；编排者对单个候选的回复只处理该候选，可提供证据或意见，但不替代你的核验。单个候选被否决或暂不派工不代表本轮审查结束。候选只是协作消息，不是最终问题或工单。',
+    '发现未确认疑点时调用 reporter_candidate，将它作为待验证调查分支 relay 给编排者。工具结果包含稳定 candidate_id、investigation_status=investigating 和 continue_investigation=true。疑点 relay 后必须在当前 DSH Session 继续调查、复现和核验同一分支；执行依赖 relay 后继续所有可行方向，并在 Worker 结果返回后核验该分支。不能因消息送达而等待批准、换题或结束审查。编排者的回复只处理当前分支，提供意见或证据，不替代你的核验；单个候选被否决或暂不派工不结束整轮。候选不是最终问题或工单。',
     '只有证据、影响和复现/源码依据已经足够明确的问题，才调用 reporter_submit_finding 进入正常工单链路；该工具不接受不确定置信度。完成调查、确认或排除当前分支后，再继续其他合理方向。',
     '完成对当前可用源码与截图 GUI 方向的充分调查，且没有未完成的调查分支后，调用 reporter_submit_report。最终“发现的问题”只能包含已经成功提交的 confirmed finding；已排除分支不作为问题，确实受阻的分支只能作为未确认背景，不能写成问题结论。摘要和完整报告均为自由文本，不要求 JSON、固定模板、最少发现数或文件清单。',
   ].filter(Boolean).join('\n')

@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
+import { ReporterAutonomousRunStartSchema, type ReporterAutonomousRunStartRequest, type ReporterAutonomousRunView } from '../../reporter/autonomous.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
@@ -17,6 +18,8 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 const RoutingNoteSchema = z.string().trim()
   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
+const ReporterStartSchema = ReporterAutonomousRunStartSchema.safeExtend({ trigger_id: z.string().min(1) })
+type ReporterStartRequest = ReporterAutonomousRunStartRequest
 export interface MainToolsHost {
   readonly context: Context
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
@@ -31,6 +34,8 @@ export interface MainToolsHost {
   sendReplies(): Promise<void>
   /** Sends an assessment or follow-up to the matching local Reporter DSH Session. */
   replyReporter?(runId: string, replyId: string, text: string): Promise<void>
+  /** Starts the native Reporter Session for an explicit human Trigger; the Runtime resolves and validates its ProjectSource. */
+  startReporter?(triggerId: string, request: ReporterStartRequest): Promise<ReporterAutonomousRunView>
   /** Runs an Engine command initiated by the main Session without emitting self-notifications. */
   quietly<T>(run: () => T): T
 }
@@ -127,7 +132,7 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
 function routeTool(host: MainToolsHost): Tool {
   return tool({
     name: 'orchestrator_route',
-    description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
+    description: '按 dispatch 为候选路由：具体实施/执行请求可 accept 或 attach；真人要求停止时 stop；无需处理时 ignore。开放审查、测试或寻找未知问题先用 orchestrator_reporter_start，即使要求发现后修复也先确认问题；已知缺陷直接交 Worker。各项按序独立执行，推断候选走 orchestrator_eval_decide。',
     schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
     execute: async ({ decisions }) => {
       const decided = new Map<string, string>()
@@ -159,6 +164,15 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
+    ...(host.startReporter ? [tool({
+      name: 'orchestrator_reporter_start',
+      description: '启动原生 DSH Reporter Session 做开放审查、产品测试或查找未知问题；即使要求发现后修复，也先确认问题。已知具体缺陷与实施目标直接交 Worker。Reporter 未启用时不以 Worker 代替审查。trigger_id 必须是仍可评估的人类 explicit Trigger，ProjectSource 由 Runtime 解析；relay/finding 不能冒充授权。goal 保留原请求；只启用已授权能力。仅在原请求已关联同项目 Ticket 时填 ticket_id。飞书后续可能需派工时，不要先 answer/clarify 消费原 Trigger。',
+      schema: ReporterStartSchema,
+      execute: async ({ trigger_id, ...request }) => {
+        const run = await host.startReporter!(trigger_id, request)
+        return { started: true, trigger_id, run_id: run.id, session_id: run.session_id, project_source_id: run.project_source_id, status: run.status }
+      },
+    })] : []),
     routeTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
@@ -242,7 +256,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     ...(host.replyReporter ? [tool({
       name: 'orchestrator_reporter_reply',
-      description: '回复 Reporter 的一个调查疑点或报告，使用唯一 reply_id 保证重试只送达一次。候选只是未确认协作消息，不是问题或工单；只处理当前候选（当前分支），说明判断、询问具体缺失证据或指出依据。不要指定 Reporter 下一项屏幕、文件或检查，也不要因候选被排除、暂不派工或单条路线受阻就结束整轮审查；进一步调查方向由 Reporter 自主选择。只有 Reporter 提交 confirmed finding 后，它才会通过正常 ProjectSource Trigger 进入 Eval/Decision/Ticket；Reporter 的观察不是用户授权，只有你独立评估后才可通过正常路由派工。',
+      description: '将编排判断、证据或 Worker 实际结果回复到指定 Reporter Session；reply_id 使重试幂等。候选不是用户请求、授权、finding 或工单；只处理当前分支，不安排后续路线或结束整轮，路线由 Reporter 自主选择。执行依赖只能在原始人类 Trigger 授权有效时经 orchestrator_route 创建真实 Worker 任务，并回传结果；不假称 Reporter 访问未绑定目录。不要先 answer/clarify 消费可能需派工的飞书 Trigger。已确认 finding 进入原有 Eval/Decision/Ticket；是否派工由你独立评估。',
       schema: z.object({ run_id: z.string().min(1), reply_id: z.string().min(1).max(160), text: z.string().trim().min(1).max(20_000) }).strict(),
       execute: async args => { await host.replyReporter!(args.run_id, args.reply_id, args.text); return { sent: true, run_id: args.run_id } },
     })] : []),
