@@ -1227,7 +1227,12 @@ describe('observing the GitHub repository', () => {
     vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => {
       calls.push(args)
       const bare = args[1]!.replace(/^repos\/acme\/widgets\/?/, '').split('?')[0]!
-      const listed = (list: unknown[] | undefined) => `HTTP/2.0 200 OK\r\nETag: "same"\r\n\r\n${JSON.stringify(list ?? [])}`
+      const listed = (list: unknown[] = []) => {
+        const pages = Array.from({ length: Math.max(1, Math.ceil(list.length / 100)) }, (_, page) => list.slice(page * 100, (page + 1) * 100))
+        if (args.includes('--paginate')) return JSON.stringify(pages)
+        const link = pages.length > 1 ? '\r\nLink: <https://api.github.com/repos/acme/widgets/list?page=2>; rel="next"' : ''
+        return `HTTP/2.0 200 OK\r\nETag: "same"${link}\r\n\r\n${JSON.stringify(pages[0])}`
+      }
       if (bare === 'notifications') return 'HTTP/2.0 200 OK\r\n\r\n[]'
       if (args.includes('If-None-Match: "same"')) throw commandError({ stderr: 'gh: HTTP 304', code: 1 })
       if (bare === 'issues') return listed(answers.issues)
@@ -1260,7 +1265,7 @@ describe('observing the GitHub repository', () => {
     expect(list()[0]![1]).toContain(`since=${encodeURIComponent(at(0))}`)
     // The next round repeats the request at the newest Issue, whose ETag the round after sends, which GitHub answers 304 for.
     await pollRound(h)
-    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started, etag: '"same"' })
+    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started, etag: '"same"', singlePage: true })
     h.receive.mockClear()
     await pollRound(h)
     expect(list().at(-1)).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
@@ -1270,6 +1275,67 @@ describe('observing the GitHub repository', () => {
     await pollRound(h)
     expect(h.store.get('github-stream:issues')).toBeUndefined()
     h.store.close()
+  })
+  it.each(['issues', 'comments', 'review-comments'])('reads all pages of the %s stream even when 101 events share one timestamp', async stream => {
+    const h = host()
+    observe(h, stream === 'issues' ? { observeIssues: true } : { observeComments: true })
+    const initial = { since: at(0), started: { [stream === 'issues' ? 'issues' : 'comments']: at(0) }, etag: '"same"' }
+    // Older versions could persist an ETag for an incomplete first page.
+    h.store.set(`github-stream:${stream}`, initial)
+    const item = (id: number) => stream === 'issues' ? issue(id) : {
+      id, body: `comment ${id}`, user: { login: 'carol', type: 'User' }, created_at: at(0), updated_at: at(0),
+      issue_url: 'https://api.github.com/repos/acme/widgets/issues/7', pull_request_url: 'https://api.github.com/repos/acme/widgets/pulls/7',
+    }
+    const items = Array.from({ length: 101 }, (_, index) => item(index + 1))
+    const answers = { [stream === 'issues' ? 'issues' : stream === 'comments' ? 'comments' : 'reviewComments']: items }
+    repository(h, answers)
+    try {
+      await pollRound(h)
+      expect(new Set(h.receive.mock.calls.map(([trigger]) => trigger.id)).size).toBe(101)
+      expect(h.store.get(`github-stream:${stream}`)).toEqual({ since: at(0), started: initial.started })
+      // The first page stays unchanged while a later page gains an event.
+      items.push(item(102))
+      h.receive.mockClear()
+      await pollRound(h)
+      expect(new Set(h.receive.mock.calls.map(([trigger]) => trigger.id)).size).toBe(102)
+    } finally { h.store.close() }
+  })
+  it('does not cache an exactly full first page before a second page appears', async () => {
+    const h = host()
+    observe(h, { observeIssues: true })
+    const initial = { since: at(0), started: { issues: at(0) } }
+    h.store.set('github-stream:issues', initial)
+    const items = Array.from({ length: 100 }, (_, index) => issue(index + 1))
+    repository(h, { issues: items })
+    try {
+      await pollRound(h)
+      expect(h.store.get('github-stream:issues')).toEqual(initial)
+      items.push(issue(101))
+      h.receive.mockClear()
+      await pollRound(h)
+      expect(new Set(h.receive.mock.calls.map(([trigger]) => trigger.id)).size).toBe(101)
+    } finally { h.store.close() }
+  })
+  it('retries a failed multi-page stream without advancing its cursor or caching the first page', async () => {
+    const h = host()
+    observe(h, { observeIssues: true })
+    const initial = { since: at(0), started: { issues: at(0) } }
+    h.store.set('github-stream:issues', initial)
+    repository(h, { issues: Array.from({ length: 101 }, (_, index) => issue(index + 1, { created_at: at(1), updated_at: at(1) })) })
+    const run = vi.mocked(h.commands.run), answer = run.getMockImplementation()!
+    let fail = true
+    run.mockImplementation(async (program, args) => {
+      if (fail && args[1]!.startsWith('repos/acme/widgets/issues?') && args.includes('--paginate')) throw refused(502, 'Bad Gateway')
+      return answer(program, args)
+    })
+    try {
+      await expect(pollRound(h)).rejects.toThrow(/issues: .*502/)
+      expect(h.store.get('github-stream:issues')).toEqual(initial)
+      fail = false
+      await pollRound(h)
+      expect(new Set(h.receive.mock.calls.map(([trigger]) => trigger.id)).size).toBe(101)
+      expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(1)), started: initial.started })
+    } finally { h.store.close() }
   })
   it('takes in the repository\'s conversation and review comments, on the Issue or PR each is on', async () => {
     const h = host()

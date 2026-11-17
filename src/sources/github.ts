@@ -198,8 +198,9 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
 /**
  * Polls one repository-wide event stream (oldest first) since its cursor and steps the cursor to five seconds before the
  * newest item (`cursorAt`), relying on Trigger ID deduplication so repeated messages are no-ops. While the cursor stays
- * unchanged (including when clamped to the hourly horizon), sending the last page's ETag makes an unchanged list return
- * HTTP 304 and cost no rate limit. Items from before their kind was switched on or beyond the horizon are ignored.
+ * unchanged (including when clamped to the hourly horizon), a cached ETag is reused only for a short single page.
+ * Full pages can hide later changes, so they are always read with pagination. Items from before their kind was switched
+ * on or beyond the horizon are ignored.
  */
 async function readStream(ctx: SourceContext, round: Round, id: string, path: string, config: GithubConfig): Promise<void> {
   const name = KV.github.stream(id)
@@ -209,16 +210,20 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   const started: Record<string, string> = Object.fromEntries(kinds.map(kind => [kind, before[kind] ?? round.started]))
   const horizon = Math.floor((Date.parse(round.started) - POLL_HORIZON_MS) / 3_600_000) * 3_600_000
   const since = new Date(Math.max(Date.parse(stored?.since ?? round.started), horizon)).toISOString()
-  const conditional = stored?.etag && stored.since === since ? ['-H', `If-None-Match: ${stored.etag}`] : []
+  const commands = ctx.commands.withSignal(round.signal)
+  // Legacy ETags may describe only the first page of a longer list.
+  const conditional = stored?.etag && stored.singlePage && stored.since === since ? ['-H', `If-None-Match: ${stored.etag}`] : []
   let raw: string
   const listed = `${path}&sort=updated&direction=asc&per_page=100&since=${encodeURIComponent(since)}`
-  try { raw = await ctx.commands.withSignal(round.signal).api(listed, '--include', ...conditional) }
+  try { raw = await commands.api(listed, '--include', ...conditional) }
   catch (error) {
     if (error instanceof CliError && error.code === 304) return
     throw error
   }
   const { headers, body } = included(raw)
-  const items = validItems(ListedSchema, z.array(z.unknown()).parse(JSON.parse(body)), round.tally)
+  const firstPage = z.array(z.unknown()).parse(JSON.parse(body))
+  const paginated = /rel="next"/.test(headers)
+  const items = paginated ? await commands.pages(ListedSchema, listed, round.tally) : validItems(ListedSchema, firstPage, round.tally)
   const { login } = ctx.deployment.github
   const fresh = (at: string | null | undefined, kind: string) =>
     kind in started && Date.parse(at ?? '') >= Math.max(Date.parse(started[kind]!), horizon)
@@ -245,8 +250,8 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   const moved = Number.isFinite(newest) ? cursorAt(new Date(newest).toISOString()) : since
   const next = Date.parse(moved) > Date.parse(since) ? moved : since
   const etag = /^etag:\s*(.+)$/im.exec(headers)?.[1]?.trim()
-  // The ETag belongs to this request, which the next round repeats only while the cursor stays unchanged.
-  ctx.state.set(name, { since: next, started, ...etag && next === since ? { etag } : {} })
+  // A full first page can stay unchanged while later pages gain items, even when it had no next link before.
+  ctx.state.set(name, { since: next, started, ...etag && next === since && !paginated && firstPage.length < 100 ? { etag, singlePage: true as const } : {} })
 }
 /** Polls default-branch CI checks, emitting a trigger only when the set of failing checks changes after the initial baseline. */
 async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {

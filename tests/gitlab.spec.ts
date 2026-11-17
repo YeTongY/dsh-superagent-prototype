@@ -9,7 +9,7 @@ import type { Machine, Probe } from '../src/deployment.ts'
 import { readGitlabCi, readGitlabRepositoryPath, gitlabCiCounts, gitlabCiFact, gitlabCiSummary } from '../src/sources/gitlab-read.ts'
 import { gitlabKind, pollRound } from '../src/sources/gitlab.ts'
 import { sendGitlab } from '../src/sources/gitlab-channel.ts'
-import { GitlabMergeRequestSchema, GitlabPipelineSchema, gitlabChannel } from '../src/sources/gitlab-trigger.ts'
+import { GitlabMergeRequestSchema, GitlabPipelineSchema, gitlabChannel, pipelineTrigger } from '../src/sources/gitlab-trigger.ts'
 import type { Thread } from '../src/core/index.ts'
 import type { SourceContext } from '../src/sources/host.ts'
 import type { Deployment } from '../src/deployment.ts'
@@ -45,7 +45,7 @@ describe('GitLab settings rendering', () => {
   })
 })
 
-function pollHarness(run: (args: string[]) => Promise<string>, disableOnMergeRequests = false, subscribed: Thread[] = []) {
+function pollHarness(run: (args: string[]) => Promise<string>, disableOnMergeRequests = false, subscribed: Thread[] = [], observePipelines = false) {
   const project = { id: 'gitlab-test', provider: 'gitlab', host: HOST, project: PROJECT, cli: 'glab', login: 'agent', noreply: 'agent@example.test' } as const
   const deployment = testDeployment({ activeProject: project, projects: { [project.id]: project as never } }) as Deployment
   const runCommand = async (_program: string, args: string[]) => {
@@ -57,7 +57,7 @@ function pollHarness(run: (args: string[]) => Promise<string>, disableOnMergeReq
   let commands: Commands
   commands = { deployment, run: runCommand, withSignal: () => commands } as unknown as Commands
   const state = new Map<string, unknown>()
-  const config = gitlabKind.schema.parse({ repository: PROJECT, host: HOST, cli: 'glab', observeComments: true })
+  const config = gitlabKind.schema.parse({ repository: PROJECT, host: HOST, cli: 'glab', observeComments: true, observePipelines })
   const context = {
     deployment, commands, ready: Promise.resolve(), configured: () => true, config: (kind: string) => kind === 'gitlab' && enabled ? config : undefined,
     state: { get: (key: string) => state.get(key), set: (key: string, value: unknown) => value === undefined ? state.delete(key) : state.set(key, value),
@@ -252,6 +252,30 @@ describe('GitLab CI evidence', () => {
 })
 
 describe('GitLab polling and delivery', () => {
+  it('keeps transitions of different pipelines on the same branch distinct, including reruns of one SHA', async () => {
+    let pipeline = { id: 1, status: 'running', ref: 'main', sha: 'a'.repeat(40) }
+    const harness = pollHarness(async args => JSON.stringify(args[1]?.startsWith(`${PATH}/pipelines?`) ? [pipeline] : []), false, [], true)
+    for (const id of [1, 2]) {
+      pipeline = { ...pipeline, id, status: 'running' }
+      await pollRound(harness.context)
+      pipeline = { ...pipeline, status: 'failed' }
+      await pollRound(harness.context)
+    }
+    const triggers = vi.mocked(harness.context.receive).mock.calls.map(([trigger]) => trigger)
+    expect(triggers.map(trigger => trigger.meta.status)).toEqual(['failed', 'failed'])
+    expect(new Set(triggers.map(trigger => trigger.id)).size).toBe(2)
+  })
+
+  it('separates MR head and observation revisions while retaining retry deduplication', () => {
+    const pipeline = { id: 1, status: 'failed', ref: 'feature', sha: 'a'.repeat(40) }
+    const mr = GitlabMergeRequestSchema.parse({ iid: 12, title: 'CI', state: 'opened', web_url: `https://${HOST}/${PROJECT}/-/merge_requests/12`,
+      author: { username: 'alice' }, source_branch: 'feature', sha: pipeline.sha })
+    const event = (fields = {}, observed = false, revision = 1) => pipelineTrigger({ ...pipeline, ...fields }, revision, HOST, PROJECT, mr, observed)
+    const first = event()
+    expect(event().id).toBe(first.id)
+    expect(new Set([first, event({ id: 2 }), event({ sha: 'b'.repeat(40) }), event({}, true), event({}, false, 2)].map(trigger => trigger.id)).size).toBe(5)
+  })
+
   it('skips a subscribed Reporter Thread and continues polling a real Issue Thread', async () => {
     const at = new Date().toISOString()
     const reporter: Thread = { key: 'gitlab-test:reporter:bootstrap:12', ref: { source: 'gitlab-test', id: 'reporter:bootstrap:12' },
