@@ -18,7 +18,7 @@ dsh-superagent 容器命令：
   healthcheck  检查 loopback 管理 API 是否可应答
   help         显示本帮助
 
-持久化约定：DSH_HOME=/data/dsh，产品 stateDir=/data/superagent，profile=superagent。
+持久化约定：DSH_HOME=/data/dsh，产品 stateDir=/data/superagent，飞书 CLI 配置和数据=/data/lark，profile=superagent。
 EOF
 }
 
@@ -45,7 +45,7 @@ NODE
 
 init_profile() {
   [ -f "$PROFILE_PATCH" ] || fail "缺少容器 profile 覆盖文件：$PROFILE_PATCH"
-  mkdir -p "${DSH_HOME:-/data/dsh}" /data/superagent /data/gh /data/glab /data/work
+  mkdir -p "${DSH_HOME:-/data/dsh}" /data/superagent /data/gh /data/glab /data/lark/config /data/lark/data /data/work
 
   if [ ! -e "$PROFILE_DIR" ]; then
     printf '初始化新的 DSH Web profile：%s\n' "$PROFILE"
@@ -82,22 +82,24 @@ check_minimum() {
 }
 
 doctor() {
-  for command in dsh pnpm gh glab git python3 tmux; do
+  for command in dsh pnpm gh glab lark-cli git python3 tmux; do
     command -v "$command" >/dev/null 2>&1 || fail "缺少运行命令：$command"
   done
   dsh --version
   pnpm --version
   gh_version=$(gh --version | awk 'NR == 1 { print $3 }')
   glab_version=$(glab --version | awk 'NR == 1 { print $2 }')
+  lark_cli_version=$(lark-cli --version | awk 'NR == 1 { print $3 }')
   check_minimum gh "$gh_version" 2.48.0
   check_minimum glab "$glab_version" 1.50.0
+  check_minimum lark-cli "$lark_cli_version" 1.0.90
   [ -f "$PROFILE_PACKAGE" ] || fail "profile 尚未初始化；先运行容器的 init 命令"
   link_state=0
   profile_has_link || link_state=$?
   [ "$link_state" -eq 0 ] || fail "profile 未链接当前镜像内的 dsh-superagent bundle；先运行 init"
   dsh --profile "$PROFILE" --patch "$PROFILE_PATCH" --dump-config >/dev/null
-  printf '检查通过：DSH profile=%s；持久化目录=/data/dsh、/data/superagent；gh=%s；glab=%s\n' \
-    "$PROFILE" "$gh_version" "$glab_version"
+  printf '检查通过：DSH profile=%s；持久化目录=/data/dsh、/data/superagent、/data/lark；gh=%s；glab=%s；lark-cli=%s\n' \
+    "$PROFILE" "$gh_version" "$glab_version" "$lark_cli_version"
 }
 
 healthcheck() {

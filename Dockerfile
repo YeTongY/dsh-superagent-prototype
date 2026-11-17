@@ -17,13 +17,16 @@ ARG DSH_VERSION=0.2.1-rc.3
 ARG PNPM_VERSION=11.7.0
 ARG GH_VERSION=2.104.0
 ARG GLAB_VERSION=1.130.0
+ARG LARK_CLI_VERSION=1.0.90
 ARG REPORTER_BROWSER=0
 
-# The release hashes were checked against the official GitHub and GitLab release assets.
+# The release hashes were checked against official release metadata, including the lark-cli npm checksums.
 ARG GH_AMD64_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
 ARG GH_ARM64_SHA256=cb34cefc6f4e77b90731374a2b737516bb8f3033c6ca46aa949e5344f68069e3
 ARG GLAB_AMD64_SHA256=caf19cb4a842da7dbe4ecf146929f44e037fc733ab3f11945a1a48798497ed51
 ARG GLAB_ARM64_SHA256=c94df210185fa4b17c5b8528004ad06572808b198a676ac227d26d5a86dd912b
+ARG LARK_CLI_AMD64_SHA256=301db5eb6d64b295e8bd366036dd839cc6686471c68e54c2602d274de0bf032a
+ARG LARK_CLI_ARM64_SHA256=dd591e9ae956d8cf34bed23901017ab842d25534fe1579e9b9bbabed267864d7
 
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends ca-certificates curl git jq openssh-client procps python3 tmux \
@@ -31,8 +34,8 @@ RUN apt-get update \
 
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
-      amd64) gh_arch=amd64; gh_sha="${GH_AMD64_SHA256}"; glab_arch=amd64; glab_sha="${GLAB_AMD64_SHA256}" ;; \
-      arm64) gh_arch=arm64; gh_sha="${GH_ARM64_SHA256}"; glab_arch=arm64; glab_sha="${GLAB_ARM64_SHA256}" ;; \
+      amd64) gh_arch=amd64; gh_sha="${GH_AMD64_SHA256}"; glab_arch=amd64; glab_sha="${GLAB_AMD64_SHA256}"; lark_arch=amd64; lark_sha="${LARK_CLI_AMD64_SHA256}" ;; \
+      arm64) gh_arch=arm64; gh_sha="${GH_ARM64_SHA256}"; glab_arch=arm64; glab_sha="${GLAB_ARM64_SHA256}"; lark_arch=arm64; lark_sha="${LARK_CLI_ARM64_SHA256}" ;; \
       *) echo "Unsupported Docker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     gh_archive="gh_${GH_VERSION}_linux_${gh_arch}.tar.gz"; \
@@ -44,7 +47,13 @@ RUN set -eux; \
     curl --fail --location --retry 4 --retry-all-errors "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/${glab_package}" -o "/tmp/${glab_package}"; \
     echo "${glab_sha}  /tmp/${glab_package}" | sha256sum --check --status; \
     apt-get update; apt-get install --yes --no-install-recommends "/tmp/${glab_package}"; \
-    rm -rf /tmp/gh "/tmp/${gh_archive}" "/tmp/${glab_package}" /var/lib/apt/lists/*
+    lark_archive="lark-cli-${LARK_CLI_VERSION}-linux-${lark_arch}.tar.gz"; \
+    curl --fail --location --retry 4 --retry-all-errors "https://github.com/larksuite/cli/releases/download/v${LARK_CLI_VERSION}/${lark_archive}" -o "/tmp/${lark_archive}"; \
+    echo "${lark_sha}  /tmp/${lark_archive}" | sha256sum --check --status; \
+    mkdir -p /tmp/lark-cli; tar -xzf "/tmp/${lark_archive}" -C /tmp/lark-cli; \
+    install -m 0755 /tmp/lark-cli/lark-cli /usr/local/bin/lark-cli; \
+    test "$(lark-cli --version | awk '{print $3}')" = "${LARK_CLI_VERSION}"; \
+    rm -rf /tmp/gh /tmp/lark-cli "/tmp/${gh_archive}" "/tmp/${glab_package}" "/tmp/${lark_archive}" /var/lib/apt/lists/*
 
 RUN npm install --global --omit=dev \
     --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs \
@@ -58,6 +67,8 @@ COPY --chown=node:node docker/profile.patch.yml /opt/dsh-superagent/docker/profi
 ENV DSH_HOME=/data/dsh \
     DSH_SUPERAGENT_PROFILE=superagent \
     HOME=/home/node \
+    LARKSUITE_CLI_CONFIG_DIR=/data/lark/config \
+    LARKSUITE_CLI_DATA_DIR=/data/lark/data \
     DSH_SUPERAGENT_REPORTER_BROWSER=${REPORTER_BROWSER} \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_ENV=production
@@ -70,7 +81,7 @@ RUN mkdir -p /ms-playwright \
  && chown -R node:node /ms-playwright
 
 RUN chmod 0755 /usr/local/bin/dsh-superagent-entrypoint \
- && mkdir -p /data/dsh /data/superagent /data/gh /data/glab /data/work \
+ && mkdir -p /data/dsh /data/superagent /data/gh /data/glab /data/lark/config /data/lark/data /data/work \
  && chown -R node:node /data
 
 USER node

@@ -15,7 +15,7 @@
 
 ## 数据与网络
 
-镜像固定为 Node 24 Debian slim，内含 DSH CLI、pnpm、Git、Python、tmux、GitHub CLI 和 glab。GitHub 与 GitLab CLI 使用固定版本，并在构建时核对 SHA-256。运行用户 UID/GID 为 1000:1000。
+镜像固定为 Node 24 Debian slim，内含 DSH CLI、pnpm、Git、Python、tmux、GitHub CLI、glab 和固定为 1.0.90 的官方 `lark-cli`。gh、glab 与 lark-cli 均固定版本并在构建时核对 SHA-256。运行用户 UID/GID 为 1000:1000。
 
 持久数据放在同一个宿主目录中：
 
@@ -25,6 +25,7 @@
 | /data/superagent | Superagent SQLite、命令环境、Ticket 状态与 Worker 工作目录 |
 | /data/gh | GitHub CLI 登录目录；首个自举项目使用 /data/gh/self |
 | /data/glab | GitLab CLI 登录目录 |
+| /data/lark | 飞书 CLI 配置与 Linux 加密凭据；初始化步骤见[006 部署说明](006-deployment.md) |
 | /data/work | 项目可配置的独立 clone/worktree 目录 |
 
 Compose 使用 network_mode: host，容器没有 ports 映射。管理 Web 服务固定监听 127.0.0.1:3082，Reporter 入口沿用同一 loopback 限制。host 网络使容器共享 911pro 的网络命名空间、DNS 和 VPN 路由，不需要在容器里运行 VPN 客户端；HTTP 代理环境变量仍需通过 Compose 环境或 ProjectSource 设置显式传入。需从别的机器访问面板时，用 911pro 的 SSH/Netcatty 端口转发；不要把 DSH Web 或 Reporter 改成 0.0.0.0。
@@ -36,7 +37,7 @@ Compose 使用 network_mode: host，容器没有 ports 映射。管理 Web 服�
     cd /home/yetongy/services/superagent-bootstrap/release
     DATA=/home/yetongy/services/superagent-bootstrap/shared/data
     sudo install -d -o 1000 -g 1000 -m 0750 "$DATA" "$DATA/dsh" "$DATA/superagent" \
-      "$DATA/gh/self" "$DATA/glab" "$DATA/work"
+      "$DATA/gh/self" "$DATA/glab" "$DATA/lark/config" "$DATA/lark/data" "$DATA/work"
     export DSH_SUPERAGENT_DATA_DIR="$DATA"
     docker compose build
     docker compose up -d

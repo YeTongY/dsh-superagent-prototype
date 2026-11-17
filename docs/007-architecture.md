@@ -483,7 +483,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 
 | 文件 | 职责 |
 | --- | --- |
-| Dockerfile | 多阶段构建，安装 DSH、gh、glab 与 Worker 命令依赖，并以 UID 1000 运行 |
+| Dockerfile | 多阶段构建，安装 DSH、gh、glab、lark-cli 与 Worker 命令依赖，并以 UID 1000 运行 |
 | .dockerignore | 从构建上下文排除持久化目录、凭据、开发缓存和运行日志 |
 | compose.yaml | host 网络、持久化 bind 目录和 Runtime 健康检查 |
 | docker/entrypoint.sh | 初始化缺失的 profile、验证 CLI/profile，并提供启动、状态与健康命令 |

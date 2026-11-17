@@ -102,6 +102,39 @@ bundle 为 Executor 定义了 `dsh-superagent-worker`，为主 Session 定义了
 
    两份配置共用应用密钥对应的 keychain 条目。若只需删除机器人配置，请删除它的目录；不要运行 `lark-cli config remove`，否则会影响共用的密钥。
 
+#### Docker 部署
+
+容器镜像固定安装官方 `lark-cli` 1.0.90 Linux 二进制，并在启动检查中确认版本。镜像把 `LARKSUITE_CLI_CONFIG_DIR` 设为 `/data/lark/config`，把 Linux 凭据存储 `LARKSUITE_CLI_DATA_DIR` 设为 `/data/lark/data`。现有 Compose 已持久化整个 `/data`，无需增加卷；首次初始化会创建目录。宿主 bind 目录须保持由容器的 `node` 用户 UID/GID 1000 可写。
+
+`config.json` 与 Linux 加密凭据、主密钥分别位于上述两个目录，升级或恢复时应一起保留。CLI 以文件方式存储密钥，不依赖桌面 keyring 或 D-Bus。文件权限由 CLI 限制为目录 `0700`、密钥和密文文件 `0600`；加密主密钥与密文在同一数据卷中，数据目录仍须使用宿主访问控制和受保护备份。
+
+在 911pro 的部署目录中创建持久 wrapper；此命令在容器默认的非 root 用户下执行，且不写入任何应用凭据：
+
+```sh
+docker compose exec -T superagent sh -c 'cat > /data/lark/lark-bot && chmod 0700 /data/lark/lark-bot' <<'EOF'
+#!/bin/sh
+export LARKSUITE_CLI_CONFIG_DIR=/data/lark/config
+export LARKSUITE_CLI_DATA_DIR=/data/lark/data
+exec /usr/local/bin/lark-cli "$@"
+EOF
+```
+
+首次配置时，在本机 Bash 交互终端执行以下命令。App Secret 由静默输入读取并通过 stdin 传给容器，不会出现在 shell 历史、进程参数、Compose 文件或镜像中：
+
+```sh
+read -r -p '飞书 App ID: ' LARK_APP_ID
+read -r -s -p '飞书 App Secret: ' LARK_APP_SECRET
+printf '\n' >&2
+printf '%s\n' "$LARK_APP_SECRET" | docker compose exec -T superagent \
+  /data/lark/lark-bot config init --app-id "$LARK_APP_ID" --brand feishu --app-secret-stdin
+unset LARK_APP_SECRET
+docker compose exec -T superagent /data/lark/lark-bot config strict-mode bot --global
+docker compose exec -T superagent /data/lark/lark-bot config strict-mode
+docker compose exec -T superagent /data/lark/lark-bot auth status
+```
+
+确认状态输出为 `strict-mode: bot` 且 `identities.bot.status` 为 `ready` 后，在 Sources 中将机器人的 CLI 设为 `/data/lark/lark-bot`，再完成现有机器人和群聊设置。Setup 还会读取机器人信息并检查机器人身份；应用事件订阅与权限仍由管理员在飞书开放平台配置，容器不会自动申请权限或扩大群消息接收范围。按实际需要选择群、仅接收提及/全部消息及私聊选项。
+
 ## 安装
 
 在尚未创建 `superagent` profile 的机器上执行一次以下命令：
