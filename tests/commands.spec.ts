@@ -58,6 +58,17 @@ describe('account-isolated operations', () => {
     await send(commands, { ...reply, channel: feishuChannel('oc_1', 'om_1') })
     expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['--as','bot','--idempotency-key','stable-operation','--message-id','om_1']))
   })
+  it('preserves valid Feishu keys and bounds long IDs without merging messages that share a prefix', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    const boundary = 'a'.repeat(50), first = boundary + 'b'.repeat(14), second = boundary + 'c'.repeat(14)
+    for (const id of [boundary, first, first, second]) await send(commands, { ...reply, id, channel: feishuChannel('oc_1', 'om_1') })
+    const keys = run.mock.calls.map(([, args]) => args[args.indexOf('--idempotency-key') + 1])
+    expect(keys[0]).toBe(boundary)
+    expect(keys[1]).toMatch(/^[a-f0-9]{32}$/)
+    expect(keys[2]).toBe(keys[1])
+    expect(keys[3]).not.toBe(keys[1])
+  })
 })
 
 it('reports Feishu failures with their code and without command arguments', () => {
