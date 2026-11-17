@@ -1,6 +1,6 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
-import { isoTime, liveTicket } from './model.ts'
+import { isFeishuOrchestratorMessage, isoTime, liveTicket, threadKey } from './model.ts'
 import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Candidate, Repositories } from './ports.ts'
 import type { EngineOptions } from './part.ts'
@@ -132,7 +132,21 @@ export class Engine {
    * @throws UserError when the ticket or trigger is unknown or the purpose's rule refuses it, such as a result of a ticket that
    * is not ready, completed, merged, or dropped.
    */
-  reply(request: ReplyRequest): Reply { return this.repo.atomic(() => this.replies.reply(request)) }
+  reply(request: ReplyRequest): Reply {
+    return this.repo.atomic(() => {
+      const reply = this.replies.reply(request)
+      if ((request.purpose === 'clarify' || request.purpose === 'answer') && request.triggerId) {
+        const trigger = this.repo.triggers.get(request.triggerId)
+        const thread = trigger && this.repo.threads.get(threadKey(trigger.threads[0]!))
+        const clarificationSent = request.purpose === 'clarify' && thread?.clarification?.triggerId === trigger?.id
+        const answered = request.purpose === 'answer' && trigger && isFeishuOrchestratorMessage(trigger)
+        if (reply.status !== 'dropped' && trigger && (clarificationSent || answered)) {
+          this.evals.handledByOrchestrator(trigger.id, clarificationSent ? 'clarificationAsked' : 'answeredByOrchestrator')
+        }
+      }
+      return reply
+    })
+  }
 
   // People, through the panel or the main Session
 

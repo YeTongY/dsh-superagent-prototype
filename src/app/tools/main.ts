@@ -224,17 +224,18 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     tool({
       name: 'orchestrator_reply',
-      description: `Send an answer to a human question, a ready result, or attention requiring human action, as the replies section says; the gate refuses anything else, such as progress. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. IM limit: ${IM_WORDS} words.`,
+      description: `答复真人问题；飞书请求范围不清时先追问（purpose=clarify）；发送已就绪结果或回复待处理的人工问题，具体边界见回复提示。工具会拒绝普通进展等其他用途。purpose=result 仅适用于工单已有就绪报告、已完成或已合并，或规则要求关闭答复的 dropped 工单。消息长度上限为 ${IM_WORDS} 个词。`,
       schema: z.object({
-        trigger_id: z.string().optional().describe('The original human question, for an answer only.'),
+        trigger_id: z.string().optional().describe('答复或澄清所针对的原始真人消息。'),
         ticket_id: z.string().optional(),
-        purpose: z.enum(['answer', 'result', 'attention']),
+        purpose: z.enum(['answer', 'clarify', 'result', 'attention']).describe('answer: 回答真人问题；clarify: 澄清飞书执行范围；result: 发送工单结果；attention: 回复工单当前待人工决定的问题。'),
         human_action: z.string().trim().min(1).optional().describe('Required for attention: the ticket\'s current attention question.'),
         text: z.string().min(1).max(20000),
       }).strict(),
       execute: async args => {
         const reply = host.engine.reply({ purpose: args.purpose, text: args.text, ...(args.trigger_id ? { triggerId: args.trigger_id } : {}),
           ...(args.ticket_id ? { ticketId: args.ticket_id } : {}), ...(args.human_action ? { question: args.human_action } : {}) })
+        if (args.purpose === 'clarify' || args.purpose === 'answer') host.requestPass()
         await host.sendReplies()
         return { status: host.store.replyStatus(reply.id) ?? reply.status }
       },

@@ -13,6 +13,7 @@ import { Store } from '../../src/app/store.ts'
 import { SettingsSchema } from '../../src/policy.ts'
 import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
+import { commentTrigger } from '../../src/sources/github-trigger.ts'
 import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
 import type { Trigger } from '../../src/core/index.ts'
@@ -26,6 +27,15 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
   const at = String(Date.parse('2026-09-09T00:00:00Z') + Number(id.replace(/\D/g, '') || 0) * 1000)
   return feishuTrigger({ message_id: `om_${id}`, chat_id: CHAT, chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: text, create_time: at,
     mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
+}
+
+/** Build a GitHub comment in Issue #1 for tests of the ordinary worker follow-up contract. */
+export function github(id: string, text: string, overrides: Record<string, unknown> = {}, issueNumber = 1): Trigger {
+  const number = Number(id.replace(/\D/g, '') || 1)
+  const at = String(Date.parse('2026-09-09T00:00:00Z') + number * 1000)
+  return commentTrigger({ id: number, body: text, user: { login: 'alice' }, created_at: at, updated_at: at,
+    html_url: `https://github.com/acme/widgets/issues/${issueNumber}#issuecomment-${number}`, ...overrides },
+  { number: issueNumber, isPr: false }, 'conversation', 'agent-bot')
 }
 
 type RegisteredTool = { name: string; description?: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }

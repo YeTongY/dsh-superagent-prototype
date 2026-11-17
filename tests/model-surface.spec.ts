@@ -190,16 +190,21 @@ async function drive(host: Host) {
   await run(master, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: a, trigger_id: other.id }] })
   await run(workerA, 'orchestrator_thread_unrelated', { thread: `feishu:${CHAT}:om_9`, reason: 'It asks for something else.' })
   await run(workerA, 'orchestrator_thread_follow', { thread: `feishu:${CHAT}:om_7`, reason: 'The same settings page.' })
-  await runtime.receive(feishu('7', '@bot 这个页面的按钮也改一下'))
+  const related = feishu('7', '@bot 这个页面的按钮也改一下')
+  await runtime.receive(related)
+  await run(master, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: a, trigger_id: related.id }] })
   const beyond = feishu('8', '另外把导出也做了', { mentions: [], root_id: 'om_1' })
   await runtime.receive(beyond)
+  await run(master, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: a, trigger_id: beyond.id }] })
   await runtime.idle()
   await run(workerA, 'orchestrator_trigger_handback', { trigger_id: beyond.id, reason: 'It asks for an export feature.' })
   await run(master, 'orchestrator_ticket_note', { ticket_id: a, text: 'Ticket B changes the same settings page.' })
   await runtime.pump()
   await runtime.idle()
   await run(workerA, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
-  await runtime.receive(feishu('2', '再加一个按钮', { mentions: [], root_id: 'om_1' }))
+  const resumed = feishu('2', '@bot 再加一个按钮', { root_id: 'om_1' })
+  await runtime.receive(resumed)
+  await run(master, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: a, trigger_id: resumed.id }] })
   await vi.waitFor(async () => {
     await runtime.pump()
     expect(runtime.store.tickets.get(a)!.inputs.some(input => input.kind === 'resumed')).toBe(true)
@@ -361,8 +366,8 @@ it('collects both roles\' tools, prompts, skills and inputs', () => {
     'orchestrator prompt runtime/admission', 'orchestrator input candidate', 'orchestrator input worker_attention', 'orchestrator input worker_report',
     'orchestrator input thread_unrelated', 'orchestrator input ticket_ended', 'orchestrator input settings_saved', 'worker input assignment (explicit)',
     'worker input assignment (inferred)', 'worker input policy-changed', 'worker input resumed', 'worker input status',
-    'worker input recovery', 'worker input note', 'worker input trigger (context)', 'orchestrator input follow_up',
-    'orchestrator input thread_followed', 'orchestrator tool orchestrator_reply error']) expect(wheres).toContain(where)
+    'worker input recovery', 'worker input note', 'orchestrator input thread_followed',
+    'orchestrator tool orchestrator_reply error']) expect(wheres).toContain(where)
   expect(sessions.refusal).not.toBe('')
 })
 

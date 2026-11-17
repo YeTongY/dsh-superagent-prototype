@@ -119,6 +119,12 @@ const CHAT = 'oc_team'
 function feishu(id: string, text: string, overrides: Record<string, unknown> = {}): Trigger {
   return feishuTrigger({ message_id: `om_${id}`, chat_id: CHAT, chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: text, create_time: String(Date.parse('2026-09-09T00:00:00Z') + Number(id.replace(/\D/g, '') || 0) * 1000), mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
+function github(id: string, text: string): Trigger {
+  const number = Number(id.replace(/\D/g, '') || 1)
+  const at = String(Date.parse('2026-09-09T00:00:00Z') + number * 1000)
+  return commentTrigger({ id: number, body: text, user: { login: 'alice' }, html_url: `https://github.com/acme/widgets/issues/1#issuecomment-${number}`,
+    created_at: at, updated_at: at }, { number: 1, isPr: false }, 'conversation', 'agent-bot')
+}
 const worktreeName = 'fix-regression'
 /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -219,7 +225,8 @@ afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await 
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
   const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!
-  expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, next_action: 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.' })
+  expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, conversation_first: true,
+    next_action: expect.stringContaining('执行范围明确') })
   expect(ticket).toMatchObject({ title: '修复回归', mandate: { strength: 'explicit', basis: expect.objectContaining({ via: 'addressed', source: 'feishu', sender: 'Alice', addressed: 'mention', scope: expect.objectContaining({ chatId: CHAT }) }) },
     execution: expect.objectContaining({ name: expect.stringMatching(/^fix-regression-/) }), origin: expect.objectContaining({ triggerId: trigger.id }) })
   expect(ticket).not.toHaveProperty('ended')
@@ -240,26 +247,167 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   expect(await route({ kind: 'accept', trigger_id: trigger.id, title: 'again', worktree_name: worktreeName, acknowledgement: 'x' })).toMatchObject({ ticket: { ticket_id: ticket.id } })
 })
 
-it('fans a person\'s later thread message out to the live worker as context and tells the orchestrator, without an Eval', async () => {
+it('queues one Feishu receipt through the real Outbox before candidate delivery, independently of assessment', async () => {
+  const order: string[] = []
+  const lark = vi.spyOn(Commands.prototype, 'lark').mockImplementation(async args => {
+    if (args[0] === 'im' && args[1] === '+messages-reply') order.push('receipt')
+    return {} as never
+  })
+  deliveries.mockImplementation(() => { order.push('candidate') })
+  const request: Trigger = { ...feishu('40', '@bot 飞书连接正常吗'), receiptEligible: true }
+  expect(await receive(request)).toBe('stored')
+  expect(runtime.store.replyStatus(key('received', request.id))).toBe('sent')
+  expect(order).toEqual(['receipt', 'candidate'])
+  expect(await receive(request)).toBe('duplicate')
+  expect(lark.mock.calls.filter(([args]) => args[0] === 'im' && args[1] === '+messages-reply')).toHaveLength(1)
+  expect(runtime.store.tickets.list()).toEqual([])
+})
+
+it('keeps Feishu clarification in the same human thread and does not grant it to another person or thread', async () => {
+  const request = feishu('41', '@bot 帮我修复一下')
+  await receive(request)
+  expect(runtime.store.tickets.list()).toEqual([])
+  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: request.id, purpose: 'clarify', text: '你希望修复哪一个页面？' })
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.clarification).toEqual({ triggerId: request.id, actor: request.actor })
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.evaluating).toBeUndefined()
+  expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_41`)).toContainEqual(expect.objectContaining({ kind: 'ignore', reason: [{ code: 'clarificationAsked', triggerId: request.id }] }))
+  const stale = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: request.id,
+    title: '修复登录', worktree_name: 'fix-login', acknowledgement: '收到，我来修复登录。' }] }) as { results: { refused?: string }[] }
+  expect(stale.results[0]?.refused).toContain('answered or clarified')
+
+  const stranger = feishu('42', '我也觉得要改', { mentions: [], root_id: 'om_41', sender_id: 'ou_bob' })
+  await receive(stranger)
+  expect(runtime.store.triggers.get(stranger.id)).not.toHaveProperty('clarificationOf')
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.clarification?.triggerId).toBe(request.id)
+
+  const unrelated = feishu('43', '按刚才说的做', { mentions: [], root_id: 'om_other' })
+  await receive(unrelated)
+  expect(runtime.store.triggers.get(unrelated.id)).not.toHaveProperty('clarificationOf')
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.clarification?.triggerId).toBe(request.id)
+
+  // Normal topic input does not need an @ mention or a reply-to-bot parent ID.
+  const continuation = feishu('44', '修复登录页面', { mentions: [], root_id: 'om_41' })
+  await receive(continuation)
+  expect(runtime.store.triggers.get(continuation.id)).toMatchObject({ clarificationOf: request.id })
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.clarification).toBeUndefined()
+  expect(runtime.store.triggers.disposition(continuation.id)?.fanout).toEqual([])
+  const candidate = relays(runtime.masterId).find(item => item.trigger_id === continuation.id)
+  expect(candidate).toMatchObject({ strength: 'explicit', conversation_first: true, clarification_of: request.id })
+
+  await route({ kind: 'accept', trigger_id: continuation.id, title: '修复登录页面', worktree_name: 'fix-login-page', acknowledgement: '收到，我来修复登录页面。' })
+  expect(runtime.store.tickets.list()).toHaveLength(1)
+  expect(await receive(continuation)).toBe('duplicate')
+  expect(runtime.store.tickets.list()).toHaveLength(1)
+})
+
+it('revalidates an unlisted addressed Feishu clarification from the original admission rule', async () => {
+  const settings = runtime.store.settings()
+  const feishuPolicy = settings.policy.sources.feishu!
+  const policy = { ...settings.policy, sources: { ...settings.policy.sources,
+    feishu: { ...feishuPolicy, allowed: [], admission: { [CHAT]: { unlistedAddressed: 'explicit' as const } } } } }
+  await runtime.settings.save('policy', policy, runtime.store.blockRevision('policy'), 'panel')
+
+  const request = feishu('51', '@bot 修一下登录页', { sender_id: 'ou_guest' })
+  await receive(request)
+  expect(runtime.engine.candidate(request.id)?.strength).toBe('explicit')
+  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: request.id, purpose: 'clarify', text: '具体是哪个页面？' })
+  const continuation = feishu('52', '登录页', { mentions: [], root_id: 'om_51', sender_id: 'ou_guest' })
+  await receive(continuation)
+  expect(runtime.store.triggers.get(continuation.id)).toMatchObject({ clarificationOf: request.id })
+  expect(runtime.engine.candidate(continuation.id)).toMatchObject({ strength: 'explicit', thread: { evaluating: { basis: {
+    via: 'admission', cell: 'unlistedAddressed' } } } })
+
+  const current = runtime.store.settings()
+  const revoked = { ...current.policy, sources: { ...current.policy.sources,
+    feishu: { ...current.policy.sources.feishu!, admission: {} } } }
+  await runtime.settings.save('policy', revoked, runtime.store.blockRevision('policy'), 'panel')
+  await runtime.idle()
+  await expect(route({ kind: 'accept', trigger_id: continuation.id, title: '修复登录页', worktree_name: 'fix-login', acknowledgement: '收到。' }))
+    .rejects.toThrow()
+  expect(runtime.store.tickets.list()).toEqual([])
+})
+
+it('answers a Feishu status query in an existing ticket thread without waking or resuming its worker', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: '暂未复现' })
+  const ended = runtime.store.tickets.get(ticket.id)!
+  expect(ended.ended).toBeDefined()
+  const query = feishu('45', '目前进度怎么样？', { mentions: [], root_id: 'om_1' })
+  await receive(query)
+  expect(runtime.store.triggers.disposition(query.id)?.fanout).toEqual([])
+  expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: ended.ended, assignments: [{ id: ended.assignments[0]!.id }] })
+  expect(relays(runtime.masterId).some(item => item.trigger_id === query.id && item.conversation_first === true)).toBe(true)
+  expect(await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '这项工作目前暂未复现。' })).toMatchObject({ status: 'sent' })
+  expect(runtime.store.tickets.get(ticket.id)?.ended).toEqual(ended.ended)
+})
+
+it('ends an answered Feishu query Eval and starts a newer request queued behind it', async () => {
+  const query = feishu('47', '@bot 飞书连接正常吗？')
+  await receive(query)
+  const newer = feishu('48', '@bot 修复登录问题', { root_id: 'om_47' })
+  runtime.receive(newer)
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_47`)?.pending).toContain(newer.id)
+  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '消息已收到，机器人当前可以回复。' })
+  expect(runtime.store.threads.get(`feishu:${CHAT}:om_47`)?.evaluating?.triggerIds).toContain(newer.id)
+  expect(runtime.store.tickets.list()).toEqual([])
+  expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_47`)).toContainEqual(expect.objectContaining({ kind: 'ignore',
+    reason: [{ code: 'answeredByOrchestrator', triggerId: query.id }] }))
+  const stale = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: query.id,
+    title: '连接问题', worktree_name: 'check-feishu', acknowledgement: '收到，我来检查连接。' }] }) as { results: { refused?: string }[] }
+  expect(stale.results[0]?.refused).toContain('answered or clarified')
+})
+
+it('does not let a Feishu message create work after its Eval was already released', async () => {
+  const query = feishu('49', '@bot 飞书连接正常吗？')
+  await receive(query)
+  const threadKey = `feishu:${CHAT}:om_49`
+  const thread = runtime.store.threads.get(threadKey)!
+  runtime.store.threads.save({ ...thread, expired: 2, evaluating: { ...thread.evaluating!, delivered: '2026-09-09T00:00:00.000Z',
+    deadline: '2026-09-09T00:00:00.000Z' } })
+  runtime.engine.evaluateDue()
+  expect(runtime.store.threads.get(threadKey)?.evaluating).toBeUndefined()
+  expect(runtime.store.decisions.byThread(threadKey).at(-1)?.reason).toEqual([{ code: 'timeout' }])
+
+  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '机器人可以正常回复。' })
+  expect(runtime.store.decisions.byThread(threadKey).at(-1)?.reason).toEqual([{ code: 'answeredByOrchestrator', triggerId: query.id }])
+  await expect(runTool(runtime.masterId, 'orchestrator_trigger_requeue', { trigger_id: query.id })).rejects.toThrow('answered or clarified')
+  await expect(route({ kind: 'accept', trigger_id: query.id, title: '测试连接', worktree_name: 'check-chat', acknowledgement: '我来检查。' }))
+    .rejects.toThrow('answered or clarified')
+  expect(runtime.store.tickets.list()).toEqual([])
+})
+
+it('refuses to attach an unlisted inferred Feishu follow-up even when an active ticket shares its thread', async () => {
+  const { ticket } = await acceptedTicket()
+  const guest = feishu('46', '顺手也改一下', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' })
+  await receive(guest)
+  const routed = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'attach', trigger_id: guest.id, ticket_id: ticket.id }] }) as { results: { refused?: string }[] }
+  expect(routed.results[0]?.refused).toContain('explicit requests')
+  expect(runtime.store.tickets.get(ticket.id)?.inputs).toEqual([])
+})
+
+it('keeps Feishu thread messages with the Orchestrator instead of fanning them out to a live worker', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   deliveries.mockClear()
   const followup = feishu('2', '顺便看看日志', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' })
+  // Older persisted Feishu Triggers have no humanWorkflow marker; the Source and human identity preserve the contract.
+  delete followup.humanWorkflow
   await receive(followup)
-  const worker = relays(sessionId)
-  expect(worker).toHaveLength(1)
-  expect(worker[0]).toMatchObject({ trigger_id: followup.id, from: 'ou_guest', text: '顺便看看日志' })
-  expect(worker[0]).not.toHaveProperty('read')
-  // Its resource renders the same, from the ticket; no body of it is stored.
-  const resource = `ticket/${ticket.id}/input/${key(runtime.store.tickets.get(ticket.id)!.inputs[0]!.id)}`
-  expect(JSON.parse(((await runTool(sessionId, 'orchestrator_read', { resource })) as { text: string }).text)).toEqual(worker[0])
-  expect(runtime.store.get(resource)).toBeUndefined()
-  expect(runtime.store.tickets.get(ticket.id)!.inputs).toEqual([expect.objectContaining({ kind: 'trigger', triggerId: followup.id })])
-  expect(relays(runtime.masterId)).toEqual([{ kind: 'follow_up', trigger_id: followup.id, from: 'ou_guest', thread: `feishu:${CHAT}:om_1`,
-    at: followup.at, text: '顺便看看日志', delivered_to: [{ ticket_id: ticket.id, title: '修复回归', state: 'working' }],
-      note: expect.stringContaining('worker has it and decides') }])
-  expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_1`).map(decision => decision.triggerIds)).toEqual([[ticket.origin.triggerId]])
-  expect(await runTool(sessionId, 'orchestrator_read', { resource: `trigger/${followup.id}` }))
-    .toMatchObject({ trigger_id: followup.id, around: { before: expect.objectContaining({ read: `trigger/${key('feishu', 'om_1')}` }) } })
+  expect(relays(sessionId)).toEqual([])
+  expect(runtime.store.triggers.disposition(followup.id)?.fanout).toEqual([])
+  expect(runtime.store.tickets.get(ticket.id)!.inputs).toEqual([])
+  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', trigger_id: followup.id, conversation_first: true })
+})
+
+it('keeps the Feishu conversation policy scoped to that source even when another Trigger carries its extension fields', async () => {
+  const { ticket, sessionId } = await acceptedTicket(github('91', '@agent-bot inspect this'))
+  deliveries.mockClear()
+  const message: Trigger = { ...github('92', 'One more detail'), humanWorkflow: 'orchestrator', receiptEligible: true }
+  await receive(message)
+  expect(runtime.store.triggers.disposition(message.id)?.fanout).toEqual([ticket.id])
+  expect(relays(sessionId)).toEqual([expect.objectContaining({ trigger_id: message.id })])
+  expect(runtime.store.replyStatus(key('received', message.id))).toBeUndefined()
+  await expect(runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: message.id, purpose: 'clarify', text: 'Which part?' }))
+    .rejects.toThrow('explicit human Feishu request')
 })
 
 it('assesses a proactive observation in the orchestrator Session and creates the ticket only on a positive auto-mode decision', async () => {
@@ -376,7 +524,7 @@ it('ends a ticket on ready when no PR is bound', async () => {
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'late' })).rejects.toThrow('Ticket ended')
 })
 
-it('stops a ticket on a person\'s instruction for good, and resumes an ended one on any person\'s message on its thread', async () => {
+it('stops a ticket on a person\'s instruction, and leaves ended-ticket follow-ups for the Orchestrator to route', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   const request = feishu('5', '@bot 停下，不用修了', { root_id: 'om_1' })
   await receive(request)
@@ -393,16 +541,18 @@ it('stops a ticket on a person\'s instruction for good, and resumes an ended one
   await runtime.pump()
   expect(runtime.store.tickets.get(ticket.id)!.ended).toBeDefined()
   await expect(route({ kind: 'attach', ticket_id: ticket.id, trigger_id: guest.id })).rejects.toThrow('stopped')
-  // A ticket that ended by itself resumes on a person's message on its thread, whoever sent it.
+  // A message on an ended ticket's thread is assessed by the Orchestrator and does not resume a Worker automatically.
   const other = await acceptedTicket(feishu('20', '@bot 修另一个'))
   await runTool(other.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'not reproduced' })
   expect(runtime.store.tickets.get(other.ticket.id)!.ended).toBeDefined()
-  await receive(feishu('21', '我这边还能复现', { mentions: [], root_id: 'om_20', sender_id: 'ou_guest' }))
-  await runtime.pump()
-  const resumed = runtime.store.tickets.get(other.ticket.id)!
-  expect(resumed.ended).toBeUndefined()
-  expect(resumed.assignments).toHaveLength(2)
-  expect(resumed.inputs.map(input => input.kind)).toContain('resumed')
+  const followup = feishu('21', '我这边还能复现', { mentions: [], root_id: 'om_20' })
+  await receive(followup)
+  const stillEnded = runtime.store.tickets.get(other.ticket.id)!
+  expect(stillEnded.ended).toBeDefined()
+  expect(stillEnded.assignments).toHaveLength(1)
+  expect(stillEnded.inputs).toEqual([])
+  expect(runtime.store.triggers.disposition(followup.id)?.fanout).toEqual([])
+  expect(relays(runtime.masterId).some(item => item.trigger_id === followup.id)).toBe(true)
 })
 
 it('tells live workers about policy changes instead of revoking them and restarts in-flight assessments', async () => {
@@ -446,6 +596,12 @@ it('acknowledges a follow-up from the worker once and rejects events outside the
   const { sessionId, ticket } = await acceptedTicket()
   const followup = feishu('10', '还有这个', { mentions: [], root_id: 'om_1' })
   await receive(followup)
+  expect(runtime.store.tickets.get(ticket.id)!.inputs).toEqual([])
+  await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: followup.id })
+  await expect(runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: followup.id, purpose: 'clarify', text: '范围还要说明吗？' }))
+    .rejects.toThrow('not been handed to a worker')
+  await expect(runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: followup.id, purpose: 'answer', text: '收到，我已经处理。' }))
+    .rejects.toThrow('No worker answer is ready')
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '收到，也处理这个。' })).toMatchObject({ acknowledgement: 'sent', reused: false })
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '不同措辞' })).toMatchObject({ reused: true })
   const stranger = feishu('11', '无关', { mentions: [], root_id: undefined })
@@ -548,7 +704,7 @@ it('projects read models for the management page and removes thread subscription
   const detail = threadDetail(viewsOf(runtime), threadKeyValue, undefined, 50)!
   expect(detail.timeline.map(item => item.id)).toEqual([trigger.id, follow.id])
   expect(detail.timeline[0]!.disposition).toMatchObject({ decision: { outcome: 'accept', ticketId: ticket.id } })
-  expect(detail.timeline[1]!.disposition).toMatchObject({ fanout: [ticket.id] })
+  expect(detail.timeline[1]!.disposition).toMatchObject({ fanout: [] })
   expect(search(viewsOf(runtime), '日志在这里', new TextCache(0)).items).toEqual([expect.objectContaining({ id: follow.id, threads: [threadKeyValue], threadTitle: '@bot 修一下回归' })])
   expect(decisionList(viewsOf(runtime), ['accept'], 0, 10)).toEqual({ items: [expect.objectContaining({ kind: 'accept', ticketId: ticket.id, threadTitle: '@bot 修一下回归' })], next_offset: null })
   const thread = runtime.store.threads.get(threadKeyValue)!
@@ -1224,12 +1380,18 @@ it('resumes several ended tickets on one thread from one message without the lau
   // A request on the first ticket's thread becomes a second ticket there once the first's worker hands it back.
   const another = feishu('31', '@bot 另一件事', { root_id: 'om_1' })
   await receive(another)
+  await route({ kind: 'attach', ticket_id: first.ticket.id, trigger_id: another.id })
   await runTool(first.sessionId, 'orchestrator_trigger_handback', { trigger_id: another.id, reason: 'Another change.' })
   const second = await acceptedTicket(another)
   for (const ticket of [first, second]) await runTool(ticket.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'nothing to do' })
-  await receive(feishu('32', '还有问题', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
-  await vi.waitFor(() => expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.ended)).toEqual([undefined, undefined]), { timeout: 3000 })
-  await vi.waitFor(() => expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.assignments.at(-1)!.state)).toEqual(['running', 'running']), { timeout: 3000 })
+  deliveries.mockClear()
+  const query = feishu('32', '目前这两个工单进度如何？', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' })
+  await receive(query)
+  expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.ended)).toEqual([expect.anything(), expect.anything()])
+  expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.assignments.at(-1)!.id))
+    .toEqual([first.ticket.assignments[0]!.id, second.ticket.assignments[0]!.id])
+  expect(deliveries.mock.calls.filter(([call]) => call.sessionId === first.sessionId || call.sessionId === second.sessionId)).toEqual([])
+  expect(relays(runtime.masterId).find(item => item.trigger_id === query.id)).toMatchObject({ kind: 'candidate', trigger_id: query.id, conversation_first: true })
 })
 
 it('attaches a message to an ended ticket and so resumes it', async () => {
@@ -1288,8 +1450,9 @@ it('drops a message only when its conversation is gone or not listened to, newes
 
 it('reports a dropped acknowledgement as dropped, with its Ticket on the Source status and in the last day\'s flow', async () => {
   const { sessionId, ticket } = await acceptedTicket()
-  const followup = feishu('10', '还有这个', { mentions: [], root_id: 'om_1' })
+  const followup = feishu('10', '@bot 还有这个', { root_id: 'om_1' })
   await receive(followup)
+  await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: followup.id })
   vi.mocked(Commands.prototype.lark).mockRejectedValue(new CliError('the message was withdrawn', 230011))
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '收到，也处理这个。' })).toMatchObject({ acknowledgement: 'dropped' })
   expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: `trigger/${followup.id}` })).toMatchObject({ acknowledgement: 'dropped' })
@@ -1360,8 +1523,9 @@ it('keeps replies and acknowledgements to an IM conversation within the IM limit
   const long = Array.from({ length: IM_WORDS + 1 }, () => 'word').join(' ')
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'reviewed' })
   await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: long })).rejects.toThrow(`maximum is ${IM_WORDS}`)
-  const follow = feishu('3', '还有一个问题', { mentions: [], root_id: trigger.meta.messageId as string, sender_id: MEMBER })
+  const follow = feishu('3', '@bot 还有一个问题', { root_id: trigger.meta.messageId as string, sender_id: MEMBER })
   await receive(follow)
+  await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: follow.id })
   await expect(runTool(sessionId, 'orchestrator_ack', { trigger_id: follow.id, text: long })).rejects.toThrow(`at most ${IM_WORDS} words`)
 })
 
@@ -1748,7 +1912,9 @@ it('gives the Assignment a restart starts the messages the replaced one had deli
   const { ticket, sessionId } = await acceptedTicket()
   // A follow-up reaches the worker mid-turn, and the process stops before a step took it: DSH disposes the worker's agent
   // with its inbox.
-  await receive(feishu('2', '另外改一下按钮', { root_id: 'om_1' }))
+  const followup = feishu('2', '@bot 另外改一下按钮', { root_id: 'om_1' })
+  await receive(followup)
+  await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: followup.id })
   const sent = () => deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId && call.text.includes('另外改一下按钮')).length
   expect(sent()).toBe(1)
   const inbox = (agents.get(sessionId)! as unknown as { inbox: { nextTurn: unknown[]; nextStep: unknown[] } }).inbox

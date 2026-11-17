@@ -1,8 +1,8 @@
 /** Shared base class and configuration for Engine domain parts. */
 import { UserError } from './errors.ts'
-import { followupOwners, reached, threadKey } from './model.ts'
+import { followupOwners, isFeishuOrchestratorMessage, reached, threadKey } from './model.ts'
 import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
+import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, GateResult, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
 
 export interface EngineOptions {
   repo: Repositories
@@ -26,6 +26,16 @@ export abstract class EnginePart {
   constructor(protected readonly options: EngineOptions) { this.repo = options.repo }
   protected now(): string { return this.options.now?.() ?? new Date().toISOString() }
   protected policy(): Policy { return this.options.policy() }
+  /** Revalidate a clarified Feishu request against the original request's current authorization basis. */
+  protected gate(trigger: Trigger, thread: Thread, tickets: Ticket[], policy: Policy = this.policy()): GateResult {
+    const current = policy.gate(trigger, thread, tickets)
+    if (!isFeishuOrchestratorMessage(trigger) || !trigger.clarificationOf) return current
+    const original = this.repo.triggers.get(trigger.clarificationOf)
+    if (!original || !isFeishuOrchestratorMessage(original) || original.actor.source !== trigger.actor.source
+      || original.actor.id !== trigger.actor.id || threadKey(original.threads[0]!) !== thread.key) return current
+    const inherited = this.gate(original, thread, tickets, policy)
+    return inherited.admissible && inherited.strength === 'explicit' ? inherited : current
+  }
   /** 领域层只比较来源给出的项目身份，不了解 GitHub/GitLab 细节。 */
   protected assertProject(ticket: Ticket, target: ThreadRef | Trigger): void {
     const project = this.options.scope.project?.bind(this.options.scope)
@@ -43,6 +53,13 @@ export abstract class EnginePart {
   protected leftToWorkers(trigger: Trigger): void {
     const owners = this.owners(trigger)
     if (owners.length) throw new UserError('workerDecides', { tickets: owners.join(', ') })
+  }
+  /** Whether this message was answered or clarified; only a newer message may now become work. */
+  protected orchestratorHandled(trigger: Trigger): boolean {
+    const thread = this.repo.threads.get(threadKey(trigger.threads[0]!))
+    return thread?.clarification?.triggerId === trigger.id
+      || !!thread && this.repo.decisions.byThread(thread.key).some(decision => decision.triggerIds.includes(trigger.id)
+        && decision.reason.some(reason => ['clarificationAsked', 'answeredByOrchestrator'].includes(reason.code)))
   }
   /**
    * Record that a ticket's worker hands back a Trigger that reached the ticket, with why, and queue it for Eval when the

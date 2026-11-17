@@ -30,12 +30,23 @@ export interface Trigger {
   human: boolean
   /** Source-declared: the sender addressed the agent, by mentioning it or in a direct message to it. */
   addressed?: 'mention' | 'direct'
+  /** Source-declared conversation policy: human messages are assessed by the Orchestrator before any worker fan-out. */
+  humanWorkflow?: 'orchestrator'
+  /** Intake-only authorization link for the same actor continuing the current clarification in this Thread. */
+  clarificationOf?: string
+  /** A live or newly recovered human event may receive the fixed inbound receipt before assessment. */
+  receiptEligible?: true
   at: string
   text: string
   channel?: ChannelRef
   url?: string
   /** Source-native details for adapters; the core never interprets them. */
   meta: Record<string, unknown>
+}
+
+/** Feishu human messages are Orchestrator-first, including stored triggers predating `humanWorkflow`. */
+export function isFeishuOrchestratorMessage(trigger: Pick<Trigger, 'source' | 'human'>): boolean {
+  return trigger.source === 'feishu' && trigger.human
 }
 
 /** Where a trigger went after intake; it grants nothing, but decides who decides a person's follow-up (see `followupOwners`). */
@@ -176,6 +187,8 @@ export interface Thread {
   /** Triggers waiting for the next eval (debounce buffer). */
   pending: string[]
   evaluating?: Evaluation
+  /** One unresolved clarification in the existing conversation, scoped to its original human request and actor. */
+  clarification?: { triggerId: string; actor: ActorRef }
   /** How many Evals of its queued Triggers expired in a row, each of which queued them again; a Decision clears it. */
   expired?: number
   /**

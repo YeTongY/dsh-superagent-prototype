@@ -112,6 +112,12 @@ export class Tickets extends EnginePart {
     this.assertProject(current, trigger)
     if (current.ended?.by === 'human') throw new UserError('ticketStopped')
     if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
+    if (this.orchestratorHandled(trigger)) throw new UserError('conversationHandled')
+    if (trigger.source === 'feishu' && trigger.human) {
+      const thread = this.thread(trigger.threads[0]!)
+      const gate = this.gate(trigger, thread, this.ticketsOnThread(thread))
+      if (!gate.admissible || gate.strength !== 'explicit') throw new UserError('notExplicit')
+    }
     return trigger
   }
   /**

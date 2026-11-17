@@ -7,7 +7,7 @@ import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
-import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
+import { CHAT, feishu, github, startRuntime, type Host } from './fixtures/host.ts'
 import { projectSourceId } from '../src/project-source.ts'
 
 let h: Host
@@ -395,26 +395,26 @@ const notices = () => h.agents.get(h.runtime.masterId)!.inject.mock.calls
   .map(([message]) => JSON.parse(message.content.map(block => block.type === 'text' ? block.text : '').join('')) as Record<string, unknown>)
 
 it('shows a candidate with its thread\'s tickets open first, the tickets it reached, those its text names, and a short next step', async () => {
-  const first = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const first = await h.acceptedTicket(github('1', '@agent-bot 修一下回归'))
   const a = first.ticket
   // Requests on its thread reach its worker, which hands back what is not its own; the main Session then routes them.
   const handBack = async (id: string) => {
     await h.runTool(first.sessionId, 'orchestrator_trigger_handback', { trigger_id: id, reason: 'Another change.' })
     await h.runtime.pump(); await h.runtime.idle()
   }
-  const second = feishu('2', '@bot 另一个问题', { root_id: 'om_1' })
+  const second = github('2', '@agent-bot 另一个问题')
   h.runtime.receive(second); await h.runtime.idle()
   await handBack(second.id)
   const b = (await h.route({ kind: 'accept', trigger_id: second.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' })).ticket as
     { ticket_id: string }
   h.runtime.engine.stopTicket(b.ticket_id)
   // A follow-up reaches the live ticket without an Eval; handed back, its candidate shows where it went.
-  const more = feishu('3', '@bot 还有按钮', { root_id: 'om_1' })
+  const more = github('3', '@agent-bot 还有按钮')
   h.runtime.receive(more); await h.runtime.idle()
   await handBack(more.id)
   const followup = relaysOf('candidate').at(-1)!
   expect((followup.related_tickets as { ticket_id: string }[]).map(card => card.ticket_id)).toEqual([a.id, b.ticket_id])
-  expect(followup).toMatchObject({ tickets_total: 2, delivered_to: [a.id], thread: `feishu:${CHAT}:om_1` })
+  expect(followup).toMatchObject({ tickets_total: 2, delivered_to: [a.id], thread: 'github:1' })
   expect(String(followup.next_action).length).toBeLessThanOrEqual(100)
   // A message elsewhere that names a pull request reads the tickets that follow it.
   const thread = { key: 'github:123', ref: { source: 'github', id: '123' }, createdAt: '', subscriptions: [a.id], correlated: [], pending: [], meta: {} }
@@ -467,13 +467,13 @@ it('answers a policy sync with the counts and what changed, not the whole list',
 })
 
 it('shows an Executor Session no id it cannot read: no Decision, no other ticket, no Trigger its ticket did not reach', async () => {
-  const { ticket, trigger, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
-  const another = feishu('2', '@bot 再修一个', { root_id: 'om_1' })
+  const { ticket, trigger, sessionId } = await h.acceptedTicket(github('1', '@agent-bot 修一下回归'))
+  const another = github('2', '@agent-bot 再修一个')
   h.runtime.receive(another); await h.runtime.idle()
   await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: another.id, reason: 'Another fix.' })
   const other = await h.acceptedTicket(another)
   const worker = (resource: string) => h.runTool(sessionId, 'orchestrator_read', { resource })
-  const thread = await worker(`thread/feishu:${CHAT}:om_1`)
+  const thread = await worker('thread/github:1')
   expect(thread).not.toHaveProperty('tickets')
   expect(thread).not.toHaveProperty('decisions')
   for (const page of [thread, await worker(`ticket/${ticket.id}`), await worker(`trigger/${trigger.id}`)]) {
@@ -481,7 +481,7 @@ it('shows an Executor Session no id it cannot read: no Decision, no other ticket
     expect(shown).not.toContain(ticket.decisionId)
     expect(shown).not.toContain(other.ticket.id)
   }
-  expect(await read(`thread/feishu:${CHAT}:om_1`)).toMatchObject({ tickets: expect.arrayContaining([expect.objectContaining({ ticket_id: other.ticket.id })]),
+  expect(await read('thread/github:1')).toMatchObject({ tickets: expect.arrayContaining([expect.objectContaining({ ticket_id: other.ticket.id })]),
     decisions: expect.arrayContaining([expect.objectContaining({ decision_id: ticket.decisionId })]) })
   expect(await read(`ticket/${ticket.id}`)).toMatchObject({ decision_id: ticket.decisionId })
 })

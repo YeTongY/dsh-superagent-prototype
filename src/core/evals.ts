@@ -88,14 +88,23 @@ export class Evals extends EnginePart {
     const started = thread.pending.filter(id => accepted.has(id))
     const startedTicket = (id: string): Reason => ({ code: 'startedTicket', triggerId: id, values: { ticket: accepted.get(id)!.ticketId! } })
     if (started.length) this.ignore(thread, started, started.map(startedTicket), policy, at)
+    const handled = thread.pending.filter(id => {
+      const trigger = this.repo.triggers.get(id)
+      return !!trigger && this.orchestratorHandled(trigger)
+    })
+    if (handled.length) {
+      thread.pending = thread.pending.filter(id => !handled.includes(id))
+      this.repo.threads.save(thread)
+    }
+    if (!thread.pending.length) return
     const triggers = thread.pending.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const tickets = this.ticketsOnThread(thread)
     const reasons: Reason[] = []
     let strongest: { trigger: Trigger; strength: Strength; basis: MandateBasis } | undefined
     for (const trigger of triggers) {
-      const gate = policy.gate(trigger, thread, tickets)
+      const gate = this.gate(trigger, thread, tickets, policy)
       if (!gate.admissible) { reasons.push({ code: gate.reason, triggerId: trigger.id }); continue }
-      const later = gate.strength === strongest?.strength && trigger.at >= strongest.trigger.at
+      const later = !!strongest && gate.strength === strongest.strength && trigger.at >= strongest.trigger.at
       const weaker = !strongest || stronger(strongest.strength, gate.strength) !== strongest.strength
       if (weaker || later) strongest = { trigger, strength: gate.strength, basis: gate.basis }
     }
@@ -133,6 +142,7 @@ export class Evals extends EnginePart {
     if (!trigger) throw new UserError('unknownTrigger')
     const held = this.holding(triggerId)
     if (outcome.evalId && held?.evaluating?.id !== outcome.evalId) throw new UserError('evalFinished', { eval: outcome.evalId })
+    if (outcome.kind !== 'ignore' && this.orchestratorHandled(trigger)) throw new UserError('conversationHandled')
     // Prevent a replayed trigger that already created a ticket from spawning a second one.
     const earlier = outcome.kind === 'accept' ? this.accepted(threadKey(trigger.threads[0]!)).get(triggerId) : undefined
     if (earlier) {
@@ -167,6 +177,7 @@ export class Evals extends EnginePart {
   private requeue(triggerId: string): boolean {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
+    if (this.orchestratorHandled(trigger)) throw new UserError('conversationHandled')
     if (this.holding(triggerId)) return false
     this.queueForEval(trigger)
     const disposition = this.repo.triggers.disposition(triggerId) ?? { fanout: [], at: this.now() }
@@ -213,6 +224,37 @@ export class Evals extends EnginePart {
     const reason: Reason = { code: 'routed', values: { ticket: ticketId } }
     if (held?.evaluating?.triggerIds.length === 1) this.finish(held, held.evaluating, { kind: 'ignore', reason: [reason] })
     else if (held) this.reassess(held, { ...reason, triggerId }, [triggerId])
+  }
+  /** Finish the message the Orchestrator answered or clarified, then queue other Triggers that shared its Eval. */
+  handledByOrchestrator(triggerId: string, reasonCode: 'answeredByOrchestrator' | 'clarificationAsked'): void {
+    const trigger = this.repo.triggers.get(triggerId)
+    if (!trigger) return
+    const keyValue = threadKey(trigger.threads[0]!)
+    const thread = this.holding(triggerId) ?? this.thread(trigger.threads[0]!)
+    const evaluation = thread.evaluating?.triggerIds.includes(triggerId) ? thread.evaluating : undefined
+    const reason = [{ code: reasonCode, triggerId }]
+    if (evaluation) {
+      const remaining = evaluation.triggerIds.filter(id => id !== triggerId)
+      this.finish(thread, { ...evaluation, primary: triggerId, triggerIds: [triggerId] }, { kind: 'ignore', reason })
+      if (!remaining.length) return
+      const current = this.repo.threads.get(thread.key)!
+      current.pending = [...new Set([...remaining, ...current.pending])]
+      this.repo.threads.save(current)
+      return
+    }
+
+    const current = this.repo.threads.get(keyValue) ?? thread
+    current.pending = current.pending.filter(id => id !== triggerId)
+    this.repo.threads.save(current)
+    const alreadyHandled = this.repo.decisions.byThread(keyValue).some(decision => decision.triggerIds.includes(triggerId)
+      && decision.reason.some(item => ['clarificationAsked', 'answeredByOrchestrator'].includes(item.code)))
+    if (alreadyHandled) return
+    const policy = this.policy(), at = this.now()
+    const gate = this.gate(trigger, current, this.ticketsOnThread(current), policy)
+    const direct: Evaluation = { id: key('eval', current.key, 'handled', triggerId, reasonCode, at), threadKey: current.key,
+      triggerIds: [triggerId], primary: triggerId, strength: gate.admissible ? gate.strength : 'inferred', actor: trigger.actor,
+      basis: gate.admissible ? gate.basis : { via: 'followup' }, policyVersion: policy.version, startedAt: at, deadline: at }
+    this.finish(current, direct, { kind: 'ignore', reason })
   }
   /** Start the Evals in progress again under the new Policy version, and say that it changed. */
   policyChanged(from: string, to: string): void {
@@ -270,7 +312,7 @@ export class Evals extends EnginePart {
    */
   private directEval(thread: Thread, trigger: Trigger, kind: AssessmentOutcome['kind'], ticketId?: string): Evaluation {
     const policy = this.policy()
-    const gate = policy.gate(trigger, thread, this.ticketsOnThread(thread))
+    const gate = this.gate(trigger, thread, this.ticketsOnThread(thread), policy)
     if (!gate.admissible) throw new UserError('notAdmissible', { reason: gate.reason })
     const at = this.now()
     if (thread.pending.includes(trigger.id)) { thread.pending = thread.pending.filter(id => id !== trigger.id); this.repo.threads.save(thread) }

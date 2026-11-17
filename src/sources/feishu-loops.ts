@@ -23,8 +23,8 @@ const bot = (ctx: SourceContext): FeishuBot => {
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
   return resolved
 }
-async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
-  await ctx.receive(trigger)
+async function receive(ctx: SourceContext, trigger: Trigger, receiptEligible = false): Promise<void> {
+  await ctx.receive(receiptEligible && trigger.human ? { ...trigger, receiptEligible: true } : trigger)
   const chatId = String(trigger.meta.chatId ?? '')
   if (!chatId) return
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId
@@ -94,7 +94,7 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       const chats = ctx.state.get(KV.feishu.chats) ?? {}
       chats[String(trigger.meta.chatId)] = trigger.meta.direct === true
       ctx.state.set(KV.feishu.chats, chats)
-      await receive(ctx, trigger)
+      await receive(ctx, trigger, true)
     }).catch(error => { reportError(String(error)) })
   })
   try {
@@ -187,7 +187,7 @@ export async function backfillChat(ctx: SourceContext, chatId: string, direct: b
         const at = feishuTime(message.create_time)
         if (message.thread_id && !(Date.parse(topics[message.thread_id] ?? '') >= Date.parse(at))) topics[message.thread_id] = at
         const trigger = feishuTrigger(historyEvent(message, chatId, direct), bot(ctx).botId, bot(ctx).appId)
-        if (trigger) await receive(ctx, trigger)
+        if (trigger) await receive(ctx, trigger, true)
       }
       const stuck = result.has_more && (!result.page_token || pages.has(result.page_token))
       if (stuck) throw new Error('Feishu history pagination did not advance')
@@ -258,7 +258,7 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
       const trigger = feishuTrigger(topicEvent(message, ref.chatId, direct, root), botId, appId)
       // Ignore messages older than the thread subscription on initial poll.
       if (!trigger || (!initialized && Date.parse(trigger.at) < since)) continue
-      await receive(ctx, trigger)
+      await receive(ctx, trigger, true)
     }
     result.messages.forEach(message => known.add(message.message_id))
     ctx.state.set(checkpoint, [...known])

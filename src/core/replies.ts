@@ -1,8 +1,8 @@
 /** The Engine's messages to Channels, each by the rule that allows it. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, ticketOutcome } from './model.ts'
-import type { ChannelRef, Ticket, Trigger } from './model.ts'
+import { isFeishuOrchestratorMessage, latestAssignment, liveTicket, ticketOutcome } from './model.ts'
+import type { ChannelRef, Thread, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
 
@@ -13,7 +13,7 @@ import { EnginePart } from './part.ts'
  */
 export type ReplyRequest =
   | { purpose: 'acknowledgement'; ticketId: string; triggerId: string; text: string }
-  | { purpose: 'answer' | 'result' | 'attention'; ticketId?: string; triggerId?: string; question?: string; text: string }
+  | { purpose: 'answer' | 'clarify' | 'result' | 'attention'; ticketId?: string; triggerId?: string; question?: string; text: string }
 /** A queued message: its id, whether it went out, and whether an earlier request had queued it already. */
 export interface Reply { id: string; status: ReplyStatus; reused: boolean }
 
@@ -66,6 +66,8 @@ export class Replies extends EnginePart {
     if (request.triggerId && !trigger) throw new UserError('unknownTrigger')
     const ticket = request.ticketId ? this.require(request.ticketId)
       : trigger ? this.repo.tickets.list().find(item => this.reaches(item, trigger)) : undefined
+    const handedToWorker = !!trigger && this.repo.tickets.list().some(item => item.origin.triggerIds.includes(trigger.id)
+      || this.repo.triggers.disposition(trigger.id)?.fanout.includes(item.id))
     if (request.purpose === 'result') {
       const outcome = ticket && ticketOutcome(ticket)
       const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
@@ -76,12 +78,28 @@ export class Replies extends EnginePart {
     // Attention replies must match the ticket's currently open question text.
     if (request.purpose === 'attention' && (!attention || attention.question !== request.question)) throw new UserError('notAttention')
     if (request.purpose === 'answer' && !trigger?.human) throw new UserError('notQuestion')
+    let clarificationThread: Thread | undefined
+    if (request.purpose === 'clarify') {
+      if (!trigger || !isFeishuOrchestratorMessage(trigger) || handedToWorker) throw new UserError('notClarifiable')
+      clarificationThread = this.thread(trigger.threads[0]!)
+      const gate = this.gate(trigger, clarificationThread, this.ticketsOnThread(clarificationThread))
+      if (!gate.admissible || gate.strength !== 'explicit') throw new UserError('notExplicit')
+    }
     const id = attention ? key('attention-reply', attention.id) : key('reply', trigger?.id ?? ticket?.id ?? '', request.text)
     const existing = this.options.outbox.status(id)
-    const ready = !ticket || !trigger || ticket.answers?.includes(trigger.id)
+    if (request.purpose === 'clarify' && existing !== 'sent' && existing !== 'dropped' && trigger && clarificationThread) {
+      clarificationThread.clarification = { triggerId: trigger.id, actor: trigger.actor }
+      this.repo.threads.save(clarificationThread)
+    }
+    // A Feishu message reserved for Orchestrator-first handling has not been handed to its worker; the Orchestrator may
+    // answer or clarify it directly without forging the worker's answer permission.
+    const orchestrated = trigger ? isFeishuOrchestratorMessage(trigger) : false
+    const orchestratedUnassigned = orchestrated && !handedToWorker
+    const ready = !ticket || !trigger || ticket.answers?.includes(trigger.id) || orchestratedUnassigned
     if (request.purpose === 'answer' && !ready && !existing) throw new UserError('noAnswer')
     const asker = attention?.triggerId ? this.repo.triggers.get(attention.triggerId) : undefined
-    const channel = request.purpose === 'answer' ? trigger!.channel : asker?.channel ?? (ticket ? this.sourceChannel(ticket) : undefined)
+    const channel = request.purpose === 'answer' || request.purpose === 'clarify'
+      ? trigger!.channel : asker?.channel ?? (ticket ? this.sourceChannel(ticket) : undefined)
     if (!channel) throw new UserError('noChannel')
     this.options.outbox.send({ id, channel, text: request.text, kind: 'reply', ...ticket ? { ticketId: ticket.id } : {} })
     if (request.purpose === 'answer' && ticket && trigger && ticket.answers?.includes(trigger.id)) {

@@ -1,4 +1,4 @@
-The reply tool enforces a purpose: result requires ticket readiness; attention requires the ticket's current structured request (ticket_id plus its exact question in human_action), even while running; answer must reference an original human question.
+回复工具会校验用途：`result` 要求工单已就绪；`attention` 要求提供工单当前的结构化请求（`ticket_id` 和 `human_action` 中完全一致的问题），即使工单仍在运行也一样；`answer` 必须引用原始真人问题。对于标记为 `conversation_first` 的飞书候选，只有尚未交给 Worker 的明确请求可以使用 `clarify` 追问必要的工作范围，并记录原发起人在同一话题中的后续消息；追问本身不会创建或附加工单。已交给 Worker 的消息继续使用该工单的回答约束。
 For a structured request, pass ticket_id and copy the current ticket.attention.question into human_action.
 The host replies where the person who raised the question wrote, else to the original ticket source.
 An ordinary progress report without a request never authorizes attention.
@@ -17,7 +17,7 @@ This applies within an existing ticket without another mention.
 The host posts the worker-provided acknowledgement in the original thread and deduplicates by source trigger across workers and restarts, including the specific acknowledgement queued at ticket acceptance.
 A new message in the same ticket has its own acknowledgement.
 Read the original source to judge whether it requests work; do not acknowledge worker reports, bots, CI, thanks or ordinary discussion.
-Answer quick questions directly without an extra acknowledgement.
+获准的飞书真人消息由宿主自动排入简短收件回执；简短咨询直接答复，不要再发接单或第二条收件确认。飞书工单话题中的查询和状态问题仍由编排者处理，不会送达或唤醒 Worker。
 Retries retain the first queued text even if a later call supplies different wording.
 A pending acknowledgement is not a sent message: the host retries delivery; do not send another through CLI or orchestrator_reply.
 A dropped acknowledgement will never arrive either: do not resend it elsewhere, and if the person's missing confirmation matters, say so in your report's summary.

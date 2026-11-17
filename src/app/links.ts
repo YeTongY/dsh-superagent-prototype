@@ -4,6 +4,7 @@ import type { Commands } from '../infra/commands.ts'
 import { readFeishuLink } from '../sources/feishu-read.ts'
 import { feishuRef, feishuSettings } from '../sources/feishu.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
+import { isFeishuOrchestratorMessage } from '../core/model.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { relatedTickets, ticketCard, triggerCard } from './cards.ts'
 import type { Store } from './store.ts'
@@ -63,9 +64,15 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
   // Format the primary trigger like a worker input (including the message it replies to) and summarize earlier batch triggers as cards.
   const others = candidate.triggers.filter(trigger => trigger.id !== primary.id)
   return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary)), strength: candidate.strength,
+    ...(isFeishuOrchestratorMessage(primary) ? { conversation_first: true } : {}),
+    ...(primary.clarificationOf ? { clarification_of: primary.clarificationOf } : {}),
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
-    next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
+    next_action: isFeishuOrchestratorMessage(primary)
+      ? candidate.strength === 'explicit'
+        ? '先由编排者处理这条飞书真人消息。用 orchestrator_reply purpose=answer 回答咨询和状态查询；执行范围明确时直接接受或附加，不增加二次确认；只有执行范围确实不清时才用 purpose=clarify 追问一个具体问题；明确的停止请求要及时处理。问题和普通讨论不能发给 Worker。'
+        : '先由编排者处理这条飞书真人消息。咨询和状态查询可以直接答复；如果考虑执行工作，先用 orchestrator_eval 和 orchestrator_eval_read 检查证据，再经 orchestrator_eval_decide 决定。问题和普通讨论不能发给 Worker。'
+      : candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
       : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.' }
 }

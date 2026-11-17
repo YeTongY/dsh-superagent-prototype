@@ -32,10 +32,12 @@ export function feishuTrigger(input: unknown, botId: string, botAppId: string): 
   const event = EventSchema.parse(input)
   if (event.sender_id === botId || event.sender_id === botAppId) return
   const direct = event.chat_type === 'p2p'
+  const human = event.sender_type === 'user'
   const mentioned = event.mentions.some(mention => mention.id === botId || mention.id === botAppId)
   const thread = feishuThreadId(event.chat_id, event.root_id, event.message_id)
   return { id: feishuTriggerId(event.message_id), source: SOURCE, threads: [{ source: SOURCE, id: thread }],
-    actor: { source: SOURCE, id: event.sender_id }, human: event.sender_type === 'user',
+    actor: { source: SOURCE, id: event.sender_id }, human,
+    ...(human ? { humanWorkflow: 'orchestrator' as const } : {}),
     ...(direct ? { addressed: 'direct' as const } : mentioned ? { addressed: 'mention' as const } : {}),
     at: feishuTime(event.create_time), text: withMentionNames(event.content, event.mentions),
     channel: feishuChannel(event.chat_id, event.message_id, direct), ...(event.message_app_link ? { url: event.message_app_link } : {}),

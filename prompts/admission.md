@@ -21,6 +21,7 @@ Example to ignore: a thread sharing another product's discussion followed by “
 Example to accept when scoped to a screenshot of this project: “this button label is odd” followed by “just 'Save' would do”; the concrete replacement establishes intent without an imperative.
 Do not decide from hedge keywords alone.
 When intent remains uncertain, ignore quietly and let subsequent messages establish it; do not ask humans to confirm routine chatter.
+对于明确标为 `conversation_first` 的飞书候选，如果用户确实要求修改，但目标或范围尚不明确，使用 `orchestrator_reply purpose=clarify` 简短追问一个问题；同一发起人在同一对话中继续后，才处理该请求。只有执行范围确实有歧义时才追问，不要对普通讨论追问。请求已经清楚时直接按原流程路由，不再增加审批；咨询和状态查询直接答复，不创建工作。
 Acceptance must record these three facts and their source quotes in intent_evidence, plus a specific acknowledgement naming the change in one short sentence, unless a matched rule requires silent acceptance; then omit acknowledgement.
 A matched rule's instruction may define what counts as requested implementation and an established target for its category.
 Omit implementation plans, unchanged behavior and routine assurances.

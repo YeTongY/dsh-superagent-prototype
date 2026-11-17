@@ -10,6 +10,8 @@ export const REASONS = {
   startedTicket: 'Already started ticket {ticket}',
   acceptedBefore: 'Trigger {trigger} was accepted before',
   routed: 'Routed to ticket {ticket}',
+  clarificationAsked: 'Asked for clarification before routing work',
+  answeredByOrchestrator: 'Answered by the Orchestrator without starting work',
   explicitRouted: 'Explicit request from an allowed sender routed by the orchestrator',
   humanStop: 'Human asked to stop',
   legacyImport: 'Imported from the pre-domain-model task record',
