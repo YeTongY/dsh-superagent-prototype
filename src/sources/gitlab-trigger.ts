@@ -101,7 +101,9 @@ export function pipelineTrigger(pipeline: GitlabPipeline, revision: number, host
   mr?: GitlabMergeRequest, projectObserved = false): Trigger {
   const mrId = mr ? gitlabThreadId('merge_request', mr.iid) : `ci:${pipeline.ref}`
   const summary = `Pipeline ${pipeline.status} on ${pipeline.ref} at ${pipeline.sha.slice(0, 7)}.`
-  return { id: key('gitlab-pipeline', mr ? String(mr.iid) : `branch:${pipeline.ref}`, String(revision)), source: SOURCE,
+  // MR snapshots and project pipelines count revisions independently; MR counters also reset for a new head.
+  return { id: key('gitlab-pipeline', mr ? String(mr.iid) : `branch:${pipeline.ref}`, projectObserved ? 'project' : 'mr',
+    String(pipeline.id), pipeline.sha, String(revision)), source: SOURCE,
     threads: [{ source: SOURCE, id: mrId }], actor: { source: SOURCE, id: '' }, human: false, at: pipeline.updated_at ?? pipeline.created_at ?? new Date().toISOString(),
     text: summary, ...(mr ? { channel: gitlabChannel(host, project, 'merge_request', mr.iid, { url: pipeline.web_url ?? mr.web_url }) } : {}),
     ...(pipeline.web_url ? { url: pipeline.web_url } : {}), meta: { ...(mr ? { iid: mr.iid, number: mr.iid, isPr: true, isMr: true } : { branch: pipeline.ref }),
