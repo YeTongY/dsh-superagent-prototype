@@ -235,8 +235,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       if (basis.via === 'followup') return mandate.strength === 'explicit' || (mode === 'auto' && rulesOn(basis.rules))
       // A bot's candidate holds only while the bot remains on its Source's bot list and passes the observation checks below.
       if (basis.via === 'bot' && !listedBot(settings, mandate.actor)) return false
-      // Reporter findings remain inferred observations and therefore require proactive evaluation to stay enabled.
-      if (basis.via === 'reporter') return mode === 'auto'
+      // Reporter findings remain inferred observations: auto mode and all matched rules must still be enabled.
+      if (basis.via === 'reporter') return mode === 'auto' && rulesOn(basis.rules)
       // An admission-table Mandate holds while the sender's current cell still grants at least the original strength.
       if (basis.via === 'admission') {
         const { cell } = basis

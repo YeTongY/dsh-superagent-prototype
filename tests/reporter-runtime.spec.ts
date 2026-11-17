@@ -9,6 +9,7 @@ import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { createRuntimeReporterBrowserFactory, reporterScreenshotAttacher } from '../src/app/runtime.ts'
 import { reporterTools } from '../src/app/tools/reporter.ts'
 import { inject as runtimeInject } from '../src/index.ts'
+import { UserError, type Trigger } from '../src/core/index.ts'
 
 let host: Host | undefined
 afterEach(async () => { await host?.stop(); host = undefined; vi.unstubAllEnvs() })
@@ -190,7 +191,8 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get()?.count)).toBe(receiptsBefore)
 })
 
-it('puts a confirmed Reporter finding through the normal Eval and Ticket chain', async () => {
+it.each(['enabled', 'disabled', 'deleted'].flatMap(rule => ['followup', 'attach'].map(via => ({ rule, via }))))(
+  'revalidates a confirmed Reporter ticket before $via with its matched rule $rule', async ({ rule, via }) => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
   host = await startRuntime()
@@ -214,9 +216,46 @@ it('puts a confirmed Reporter finding through the normal Eval and Ticket chain',
     direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: finding.evidence },
   })
   expect(accepted).toMatchObject({ decision: 'accept', ticket: { ticket_id: expect.any(String) } })
+  await runtime.idle()
   const ticket = runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
   expect(ticket.origin.triggerId).toBe(triggerId)
-  expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: { via: 'reporter', authority: 'confirmed' } })
+  expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: { via: 'reporter', authority: 'confirmed', rules: ['visual'] } })
+  runtime.engine.bindThread(ticket.id, { source: 'github', id: '7' }, true)
+  await host.runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'dropped', summary: '本轮结束。' })
+  await runtime.idle()
+  const ended = runtime.store.tickets.get(ticket.id)!.ended
+  expect(ended).toMatchObject({ by: 'executor' })
+
+  const policy = runtime.store.settings().policy
+  const rules = rule === 'deleted' ? policy.rules.filter(item => item.id !== 'visual')
+    : policy.rules.map(item => ({ ...item, enabled: item.id === 'visual' ? rule === 'enabled' : item.enabled }))
+  await runtime.settings.save('policy', { ...policy, rules }, runtime.store.blockRevision('policy'), 'panel')
+  expect(runtime.store.settings().eval.mode).toBe('auto')
+  expect(runtime.store.tickets.get(ticket.id)!.inputs.some(input => input.kind === 'policy-changed')).toBe(false)
+
+  const message: Trigger = { id: 'reporter-followup', source: 'github', actor: { source: 'github', id: 'alice' }, human: true,
+    threads: [{ source: 'github', id: via === 'attach' ? '8' : '7' }], addressed: 'mention', at: new Date().toISOString(),
+    text: '请继续检查这个问题。', meta: { number: via === 'attach' ? 8 : 7, isPr: true, kind: 'conversation' } }
+  runtime.receive(message)
+  await runtime.idle()
+  if (via === 'attach') {
+    if (rule === 'enabled') runtime.engine.attach(ticket.id, message.id)
+    else expect(() => runtime.engine.attach(ticket.id, message.id)).toThrow(new UserError('mandateRevoked'))
+    await runtime.idle()
+  }
+  const current = runtime.store.tickets.get(ticket.id)!
+  expect(current.mandate).toEqual(ticket.mandate)
+  if (rule === 'enabled') {
+    expect(current.ended).toBeUndefined()
+    expect(current.assignments).toHaveLength(2)
+    expect(runtime.store.triggers.disposition(message.id)?.fanout).toContain(ticket.id)
+  } else {
+    expect(current.ended).toEqual(ended)
+    expect(current.assignments).toHaveLength(1)
+    expect(current.undelivered).toEqual([])
+    expect(runtime.store.triggers.disposition(message.id)?.fanout).not.toContain(ticket.id)
+    expect(runtime.engine.candidate(message.id)).toBeDefined()
+  }
 })
 
 it('offers only the current simulation safe projection on demand and advances its sequence with accepted input', async () => {
