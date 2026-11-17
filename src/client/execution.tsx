@@ -2,7 +2,7 @@
 import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
-import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
+import { loadList, usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
 import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
@@ -16,7 +16,8 @@ export function ExecutionStatus({ filter: current, state, reload }: {
 }) {
   const { t, call, navigate } = usePanel()
   const [limit, setLimit] = useState(20)
-  const { data, error, reload: reloadTickets } = usePoll(() => call('GET tickets', { query: { state: current, limit } }), [current, limit])
+  const { data, error, reload: reloadTickets } = usePoll(() => loadList(query => call('GET tickets', { query: { state: current,
+    ...query } }), limit), [current, limit])
   const { paused, load: { maxWorkers } } = state
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
   const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }

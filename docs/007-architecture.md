@@ -469,6 +469,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | `tests/service-script.spec.ts` | 使用伪造的 `ps`、`tmux` 和 `dsh` 测试 `scripts/dsh-superagent`。 |
 | `tests/client.spec.tsx`、`tests/navigation.spec.ts`、`tests/controls.spec.tsx` | 客户端插件的注册与轮询、Session 导航和路由状态、本地控件，以及管理面板的无循环导入结构。 |
 | `tests/panel-overview.spec.tsx`、`panel-source.spec.tsx`、`panel-trigger.spec.tsx`、`panel-eval.spec.tsx`、`panel-execution.spec.tsx` | 使用按路由响应的伪造管理 API 测试管理面板各页面。 |
+| `tests/panel-pagination.spec.tsx` | 评估、触发和执行列表跨服务端分页上限加载，轮询插入和删除后的前缀重建、筛选重置，以及后续页失败后的保留与恢复。 |
 | `tests/panel-settings.spec.tsx`、`panel-prompts.spec.tsx`、`panel-deployment.spec.tsx`、`panel-panel.spec.tsx` | 设置分组、草稿和历史、Prompt、Deployment 页面，以及管理面板搜索、术语表和路由状态。 |
 | `tests/draft.spec.ts`、`tests/prompt-config.spec.ts`、`tests/markdown.spec.ts`、`tests/marks.spec.ts` | 草稿状态、合并和保存栏文案；分区 Prompt 配置及逐行差异；Markdown 子集及其链接；视图分类的所有状态标记。 |
 | `tests/locales.spec.ts`、`tests/styles.spec.ts` | 两种语言的文案和样式表。 |
