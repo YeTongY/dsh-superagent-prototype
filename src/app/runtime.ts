@@ -157,7 +157,9 @@ export class Runtime extends Service implements SourceHost {
       const parent = agent.session.header.parentSession
       if (parent) this.reporterSessionParents.set(agent.id, parent)
     }))
-    this.disposers.push(ctx.on('agent/error', ({ agent, error }) => this.reporterRuns?.sessionFailed(agent.id, error)))
+    this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
+      if (!this.closing()) this.reporterRuns?.sessionFailed(agent.id, error)
+    }))
     this.disposers.push(ctx.on('agent/disposed', ({ agent }) => {
       let current: string | undefined = agent.id
       while (current) {

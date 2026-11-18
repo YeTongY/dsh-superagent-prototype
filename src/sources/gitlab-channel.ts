@@ -9,7 +9,8 @@ import type { ChannelLink, ChannelLinks } from './kind.ts'
 import { GitlabNoteSchema, SOURCE, gitlabPage, type GitlabNote, type GitlabResourceKind } from './gitlab-trigger.ts'
 
 const DiscussionSchema = z.looseObject({ id: z.string(), notes: z.array(z.unknown()) })
-const missing = (error: unknown): boolean => error instanceof CliError && (error.code === 404 || error.code === 410)
+// GitLab also returns 404 for inaccessible projects, so keep those replies queued for retry.
+const gone = (error: unknown): boolean => error instanceof CliError && error.code === 410
 const locked = (error: unknown): boolean => error instanceof CliError && error.code === 403 && /locked/i.test(error.message)
 
 /** Posts a top-level note or a reply in an MR discussion; an embedded marker makes the operation idempotent. */
@@ -38,7 +39,7 @@ export async function sendGitlab(host: Pick<SourceContext, 'commands'>, message:
     await runner.raw(notesPath, '--method', 'POST', '--field', `body=${message.text}\n\n${marker}`)
     return 'sent'
   } catch (error) {
-    if (missing(error) || locked(error)) return 'gone'
+    if (gone(error) || locked(error)) return 'gone'
     throw error
   }
 }

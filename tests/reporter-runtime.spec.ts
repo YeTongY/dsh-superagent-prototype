@@ -2,7 +2,10 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { join } from 'node:path'
+import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
+import { KV } from '../src/kv.ts'
 import { projectSourceId } from '../src/project-source.ts'
 import { gitlabKind } from '../src/sources/gitlab.ts'
 import { feishu, github, startRuntime, type Host } from './fixtures/host.ts'
@@ -95,6 +98,28 @@ it('keeps Reporter off in ordinary runtime configuration', async () => {
   expect(host.tools.get(host.runtime.masterId)?.has('orchestrator_reporter_start')).toBe(true)
   await expect(host.runTool(host.runtime.masterId, 'orchestrator_reporter_start', { trigger_id: 'not-available', goal: '审查代码',
     mode: 'real-service', permissions: { read_only_service: true } })).rejects.toMatchObject({ code: 'reporter_disabled' })
+})
+
+it('keeps an active Reporter recoverable when Runtime shutdown cancels its DSH turn', async () => {
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '1')
+  vi.stubEnv('DSH_SUPERAGENT_REPORTER_TOKEN', 'a-test-capability-with-more-than-32-characters')
+  host = await startRuntime()
+  const run = await host.runtime.reporterRuns!.start({ idempotency_key: 'reporter-shutdown-resume', goal: '检查当前项目',
+    project_source_id: 'github', mode: 'real-service', permissions: { read_only_service: true } })
+  const agent = host.agents.get(run.session_id)!
+  agent.cancel.mockImplementation(() => {
+    agent.status = 'idle'
+    host!.ctx.emit('agent/status', { agent, status: 'idle' } as never)
+    host!.ctx.emit('agent/error', { agent, turn: 1, step: 1,
+      error: Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }) } as never)
+  })
+
+  await host.runtime.stop()
+
+  expect(host.runtime.reporterRuns!.get(run.id)).toMatchObject({ status: 'waiting', session_id: run.session_id })
+  const store = new Store(join(host.directory, 'orchestrator.sqlite'))
+  try { expect(store.get(KV.reporter.runs(run.id))?.view).toMatchObject({ status: 'running', session_id: run.session_id }) }
+  finally { store.close() }
 })
 
 it('routes an open-ended Feishu review to Reporter first and returns a real Worker result through existing Sessions', async () => {

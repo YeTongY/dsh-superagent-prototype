@@ -191,7 +191,8 @@ function query(path: string, values: Record<string, string | number | undefined>
 /** One project-local poll round: updated Issues/MRs, notes, MR lifecycle/approvals/CI, project pipelines and subscribed threads. */
 export async function pollRound(ctx: SourceContext, signal = new AbortController().signal): Promise<number> {
   const started = new Date().toISOString()
-  const since = ctx.state.get(CURSOR) ?? started
+  const previous = ctx.state.get(CURSOR)
+  const since = previous ?? started
   const round: PollRound = { started, since, failures: [], dropped: [], tally: { skipped: 0 } }
   const config = configOf(ctx)
   if (!config) return 60
@@ -228,7 +229,10 @@ export async function pollRound(ctx: SourceContext, signal = new AbortController
     if (!signal.aborted) round.failures.push(String(error))
   }
   if (signal.aborted || !ctx.config(SOURCE)) return config.pollSeconds
-  if (round.failures.length) throw new Error(`${round.failures.length} GitLab reads failed: ${round.failures.slice(0, 3).join('; ')}`)
+  if (round.failures.length) {
+    if (previous === undefined) ctx.state.set(CURSOR, since)
+    throw new Error(`${round.failures.length} GitLab reads failed: ${round.failures.slice(0, 3).join('; ')}`)
+  }
   ctx.state.set(CURSOR, cursorAt(started))
   const dropped = round.dropped.length ? `; deleted resources: ${round.dropped.slice(0, 5).join(', ')}` : ''
   const skipped = round.tally.skipped ? `; ${round.tally.skipped} unreadable items skipped` : ''
@@ -316,16 +320,24 @@ async function pollProjectPipelines(ctx: SourceContext, round: PollRound, mergeR
 
 async function pollSubscribedThreads(ctx: SourceContext, round: PollRound, signal: AbortSignal): Promise<void> {
   await pollEach(ctx, SOURCE, () => stopped(ctx, round, signal), async thread => {
-    const parts = /^(issue|mr):([1-9]\d*)$/.exec(thread.ref.id)
-    if (!parts) return
-    const kind = parts[1] === 'issue' ? 'issue' : 'merge_request'
-    const iid = Number(parts[2])
-    const runner = glabFor(ctx.commands.withSignal(signal))
-    const item = kind === 'issue'
-      ? await runner.api(GitlabIssueSchema, `${runner.projectPath}/issues/${iid}`)
-      : await readGitlabMergeRequestForContext(ctx, iid, signal)
-    if (kind === 'merge_request') await observeGitlabMergeRequest(ctx, item as GitlabMergeRequest)
-    await intakeNotes(ctx, round, kind, item, signal)
+    try {
+      const parts = /^(issue|mr):([1-9]\d*)$/.exec(thread.ref.id)
+      if (!parts) return
+      const kind = parts[1] === 'issue' ? 'issue' : 'merge_request'
+      const iid = Number(parts[2])
+      const runner = glabFor(ctx.commands.withSignal(signal))
+      const item = kind === 'issue'
+        ? await runner.api(GitlabIssueSchema, `${runner.projectPath}/issues/${iid}`)
+        : await readGitlabMergeRequestForContext(ctx, iid, signal)
+      if (kind === 'merge_request') await observeGitlabMergeRequest(ctx, item as GitlabMergeRequest)
+      await intakeNotes(ctx, round, kind, item, signal)
+    } catch (error) {
+      // The shared poller records per-thread errors and continues. Also fail this round so its global cursor stays put.
+      if (stopped(ctx, round, signal)) throw error
+      if (error instanceof CliError && error.code === 410) round.dropped.push(thread.ref.id)
+      else round.failures.push(`${thread.key}: ${String(error)}`)
+      throw error
+    }
   }, thread => !/^(issue|mr):[1-9]\d*$/.test(thread.ref.id))
 }
 function nameThread(ctx: SourceContext, kind: GitlabResourceKind, iid: number, title: string, url: string): void {

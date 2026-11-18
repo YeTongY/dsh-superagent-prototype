@@ -299,7 +299,7 @@ describe('GitLab polling and delivery', () => {
     expect(harness.context.threads.patch).toHaveBeenCalledWith(issue.key, { pollError: undefined })
   })
 
-  it('does not advance the poll cursor on HTTP 503 and retries on the next poll', async () => {
+  it('retries from the same start after the first poll fails with HTTP 503', async () => {
     const issueReads: string[] = []
     let fail = true
     const harness = pollHarness(async args => {
@@ -312,10 +312,55 @@ describe('GitLab polling and delivery', () => {
     })
 
     await expect(pollRound(harness.context)).rejects.toThrow('GitLab reads failed')
-    expect(harness.state.get('gitlab-since')).toBeUndefined()
+    const since = new URL(issueReads[0]!, `https://${HOST}/`).searchParams.get('updated_after')
+    expect(harness.state.get('gitlab-since')).toEqual(since)
     await expect(pollRound(harness.context)).resolves.toBe(60)
-    expect(issueReads).toHaveLength(2)
+    expect(issueReads).toEqual([issueReads[0], issueReads[0]])
     expect(harness.state.get('gitlab-since')).toEqual(expect.any(String))
+  })
+
+  it('keeps the project cursor when a subscribed thread read fails, then retries the note next round', async () => {
+    const since = new Date(Date.now() - 60_000).toISOString()
+    const noteAt = new Date().toISOString()
+    let fail = true
+    const thread: Thread = { key: 'gitlab-test:issue:12', ref: { source: 'gitlab-test', id: 'issue:12' }, createdAt: since,
+      lastAt: noteAt, subscriptions: ['ticket-12'], correlated: [], pending: [], meta: { iid: 12, kind: 'issue' } }
+    const harness = pollHarness(async args => {
+      const endpoint = args[1] ?? ''
+      if (endpoint.includes('/issues/12/notes?')) {
+        if (fail) throw new CliError('Service Unavailable (HTTP 503)', 503, 1)
+        return JSON.stringify([{ id: 7, body: '@agent please fix this', author: { username: 'alice' }, created_at: noteAt }])
+      }
+      if (endpoint.endsWith('/issues/12')) return JSON.stringify({ iid: 12, title: 'Issue 12', description: '', state: 'opened',
+        created_at: since, updated_at: since, web_url: `https://${HOST}/${PROJECT}/-/issues/12`, author: { username: 'alice' } })
+      return '[]'
+    }, false, [thread])
+    harness.state.set('gitlab-since', since)
+
+    await expect(pollRound(harness.context)).rejects.toThrow('GitLab reads failed')
+    expect(harness.state.get('gitlab-since')).toBe(since)
+    expect(harness.context.threads.patch).toHaveBeenCalledWith(thread.key, { pollError: expect.stringContaining('503') })
+
+    fail = false
+    await expect(pollRound(harness.context)).resolves.toBe(60)
+    expect(harness.context.receive).toHaveBeenCalledWith(expect.objectContaining({ text: '@agent please fix this', meta: expect.objectContaining({ noteId: 7 }) }))
+    expect(harness.state.get('gitlab-since')).not.toBe(since)
+  })
+
+  it('records a subscribed issue returning 410 and advances the project cursor', async () => {
+    const since = new Date(Date.now() - 60_000).toISOString()
+    const thread: Thread = { key: 'gitlab-test:issue:12', ref: { source: 'gitlab-test', id: 'issue:12' }, createdAt: since,
+      subscriptions: ['ticket-12'], correlated: [], pending: [], meta: {} }
+    const harness = pollHarness(async args => {
+      if (args[1] === `${PATH}/issues/12`) throw new CliError('Gone (HTTP 410)', 410, 1)
+      return '[]'
+    }, false, [thread])
+    harness.state.set('gitlab-since', since)
+
+    await expect(pollRound(harness.context)).resolves.toBe(60)
+    expect(Date.parse(harness.state.get('gitlab-since') as string)).toBeGreaterThan(Date.parse(since))
+    expect(harness.context.threads.patch).toHaveBeenCalledWith(thread.key, { pollError: expect.stringContaining('410') })
+    expect(harness.context.report).toHaveBeenCalledWith('gitlab', expect.objectContaining({ state: 'ready', detail: expect.stringContaining('deleted resources: issue:12') }))
   })
 
   it('reads human follow-up notes on Issues opened by the agent itself', async () => {
@@ -339,6 +384,44 @@ describe('GitLab polling and delivery', () => {
 
     await expect(pollRound(harness.context)).resolves.toBe(60)
     expect(harness.state.get('gitlab-since')).toBeUndefined()
+  })
+
+  it.each(['read', 'post'])('retries a GitLab reply after a 404 on %s', async failedRequest => {
+    const notesPath = `${PATH}/issues/12/notes`
+    let denied = true
+    const post = vi.fn()
+    const run = async (_program: string, args: string[]) => {
+      if (args[0] === 'config') return 'false'
+      if (args[1]?.startsWith(`${notesPath}?`)) {
+        if (denied && failedRequest === 'read') throw new CliError('404 Project Not Found', 404)
+        return '[]'
+      }
+      if (args[1] === notesPath && args.includes('POST')) {
+        if (denied) throw new CliError('404 Project Not Found', 404)
+        post()
+        return '{}'
+      }
+      throw new Error(`Unexpected fake glab request: ${args.join(' ')}`)
+    }
+    const project = { id: 'gitlab-test', provider: 'gitlab', host: HOST, project: PROJECT, cli: 'glab', login: 'agent' }
+    const commands = { deployment: { activeProject: project }, run } as unknown as Commands
+    const message = { id: 'retry-reply', channel: gitlabChannel(HOST, PROJECT, 'issue', 12), text: 'Reply text', kind: 'reply' as const }
+
+    await expect(sendGitlab({ commands }, message)).rejects.toMatchObject({ code: 404 })
+    denied = false
+    await expect(sendGitlab({ commands }, message)).resolves.toBe('sent')
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('ends GitLab reply delivery when the target returns 410', async () => {
+    const project = { id: 'gitlab-test', provider: 'gitlab', host: HOST, project: PROJECT, cli: 'glab', login: 'agent' }
+    const run = async (_program: string, args: string[]) => {
+      if (args[0] === 'config') return 'false'
+      throw new CliError('Gone (HTTP 410)', 410)
+    }
+    const commands = { deployment: { activeProject: project }, run } as unknown as Commands
+    const message = { id: 'gone-reply', channel: gitlabChannel(HOST, PROJECT, 'issue', 12), text: 'Reply text', kind: 'reply' as const }
+    await expect(sendGitlab({ commands }, message)).resolves.toBe('gone')
   })
 
   it('posts one idempotent reply through a discussion endpoint and rejects a foreign host', async () => {
