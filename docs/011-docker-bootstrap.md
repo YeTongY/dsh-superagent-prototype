@@ -13,6 +13,30 @@
 
 实际检查 DSH 0.2.1-rc.3 的 CLI 后确定：首次创建 superagent Web profile 并链接 bundle；后续启动不能再次使用会替换 profile 的 from-default-profile 选项。容器入口检测已有 profile，遇到不完整目录或来源不同的 bundle 会停止并提示检查。
 
+## 自动构建与发布镜像
+
+GitHub Actions 复用仓库现有的 Dockerfile 和构建参数，构建 `linux/amd64` 与 `linux/arm64` 镜像，并把两种架构发布到同一个 GitHub Packages 容器包。GHCR 镜像地址使用小写的 GitHub 仓库全名，本仓库的 fork 对应 `ghcr.io/yetongy/dsh-superagent-prototype`。
+
+| 推送内容 | GHCR 镜像标签 |
+| --- | --- |
+| `main` 提交 | `edge` |
+| `test/*` 分支提交，如 `test/docker-publish` | 分支名转换为 Docker 标签，如 `test-docker-publish` |
+| 带 `v` 前缀的 Git 标签，如 `v0.1.0` 或 `v0.1.0-rc.1` | 同名标签，如 `v0.1.0` 或 `v0.1.0-rc.1` |
+
+每次构建也会发布 `sha-<完整提交 SHA>` 标签，便于从提交定位镜像。需要固定到某次构建的产物时，可使用 Actions 构建记录输出的镜像摘要。
+
+流水线使用 Actions 自动提供的 `GITHUB_TOKEN` 发布，首次发布的容器包默认是私有的。拉取私有镜像前，请使用具备该包读取权限的 GitHub 账号和带 `read:packages` 权限的 classic PAT 登录 `ghcr.io`。包的可见性和访问权限在 GitHub Packages 页面管理。
+
+```sh
+docker pull ghcr.io/yetongy/dsh-superagent-prototype:test-docker-publish
+```
+
+参考 GitHub 官方的 GHCR 发布流程，使用 Docker 官方 Actions 生成镜像标签和来源信息、登录并推送。Open WebUI 的流水线同样将分支与版本标签发布到 GHCR，并以多架构镜像提供下载。本项目只有一种镜像配置，用一次 Buildx 构建生成两种架构的清单。
+
+- [GitHub Actions 发布 Docker 镜像](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)
+- [GitHub Container Registry 认证与访问权限](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+- [Open WebUI 镜像发布流水线](https://github.com/open-webui/open-webui/blob/40b1c561a5d45cabd258aa06d164bbc3e080696c/.github/workflows/docker.yaml)
+
 ## 数据与网络
 
 镜像固定为 Node 24 Debian slim，内含 DSH CLI、pnpm、Git、Python、tmux、GitHub CLI、glab 和固定为 1.0.90 的官方 `lark-cli`。gh、glab 与 lark-cli 均固定版本并在构建时核对 SHA-256。运行用户 UID/GID 为 1000:1000。
