@@ -1,6 +1,6 @@
 # 011 Docker 部署与自举
 
-本文说明如何将 dsh-superagent 作为容器运行，并把部署仓库登记为第一个项目。已选目标环境是 Netcatty 中的 Linux 911pro；方案使用 Linux host 网络，需要 Docker Engine 与 Docker Compose v2。
+本文说明如何在 Linux 宿主机上运行 dsh-superagent 容器，并把部署仓库登记为第一个项目。方案使用 Docker 的 host 网络，需要 Docker Engine 与 Docker Compose v2。
 
 ## 设计取舍
 
@@ -52,14 +52,15 @@ docker pull ghcr.io/yetongy/dsh-superagent-prototype:test-docker-publish
 | /data/lark | 飞书 CLI 配置与 Linux 加密凭据；初始化步骤见[006 部署说明](006-deployment.md) |
 | /data/work | 项目可配置的独立 clone/worktree 目录 |
 
-Compose 使用 network_mode: host，容器没有 ports 映射。管理 Web 服务固定监听 127.0.0.1:3082，Reporter 入口沿用同一 loopback 限制。host 网络使容器共享 911pro 的网络命名空间、DNS 和 VPN 路由，不需要在容器里运行 VPN 客户端；HTTP 代理环境变量仍需通过 Compose 环境或 ProjectSource 设置显式传入。需从别的机器访问面板时，用 911pro 的 SSH/Netcatty 端口转发；不要把 DSH Web 或 Reporter 改成 0.0.0.0。
+Compose 使用 `network_mode: host`。管理 Web 服务和 Reporter 入口均保留本机回环限制，管理 Web 服务监听 `127.0.0.1:3082`。容器沿用宿主机的网络路由。需要 HTTP 代理时，通过 Compose 运行时环境或 ProjectSource 设置传入。远程访问时，使用部署环境批准的访问方式，并保持服务监听回环地址。
 
-## 在 911pro 构建与启动
+## 在 Linux 宿主机上构建与启动
 
-先把本仓库干净工作树传到 911pro 的独立部署目录。目录应包含 Dockerfile、.dockerignore、compose.yaml、docker/、项目 package.json、pnpm-lock.yaml、源码、构建配置及 cordis.patch.yml。不要传 .git、node_modules、.data、模型或 CLI 凭据、真实 runtime.env。
+先把干净工作树放到宿主机的独立发布目录。下例用 `$HOME/superagent-deploy` 作为部署根目录，`release/` 存放源码，`shared/` 存放持久数据和备份。发布目录应包含 `Dockerfile`、`.dockerignore`、`compose.yaml`、`docker/`、`package.json`、`pnpm-lock.yaml`、源码、构建配置及 `cordis.patch.yml`。排除 `.git`、`node_modules`、`.data`、模型或 CLI 凭据及真实 `runtime.env`。
 
-    cd /home/yetongy/services/superagent-bootstrap/release
-    DATA=/home/yetongy/services/superagent-bootstrap/shared/data
+    DEPLOY_ROOT="$HOME/superagent-deploy"
+    cd "$DEPLOY_ROOT/release"
+    DATA="$DEPLOY_ROOT/shared/data"
     sudo install -d -o 1000 -g 1000 -m 0750 "$DATA" "$DATA/dsh" "$DATA/superagent" \
       "$DATA/gh/self" "$DATA/glab" "$DATA/lark/config" "$DATA/lark/data" "$DATA/work"
     export DSH_SUPERAGENT_DATA_DIR="$DATA"
@@ -101,7 +102,7 @@ docker compose up -d
     docker compose exec -e GH_CONFIG_DIR=/data/gh/self superagent \
       gh api user --jq .login
 
-用 GH_CONFIG_DIR=/data/gh/self 创建 GitHub ProjectSource，repository 填写当前用户有写权限的 fork，例如 YeTongY/dsh-superagent-prototype，configDir 填相同绝对路径 /data/gh/self，CLI 使用 gh。然后按返回的 ProjectSource ID 单独设置 Policy 允许名单，并从状态/来源页面确认身份、项目读取和写入能力。不要把只读官方仓库 deepseek-ai/dsh-superagent-prototype 当成首个工作仓库。
+用 `GH_CONFIG_DIR=/data/gh/self` 创建 GitHub ProjectSource。将示例中的 `owner` 换成有写权限的 fork 所有者，`configDir` 填 `/data/gh/self`，CLI 使用 `gh`。然后按返回的 ProjectSource ID 单独设置 Policy 允许名单，并从状态/来源页面确认身份、项目读取和写入能力。首个工作仓库需要支持写入。
 
 以下管理 API 必须通过本机或 SSH 转发访问，示例展示创建项目的调用形状：
 
@@ -110,7 +111,7 @@ docker compose up -d
       -H 'x-orchestrator-request: 1' \
       -H 'Content-Type: application/json' \
       http://127.0.0.1:3082/orchestrator/api/projects \
-      --data '{"provider":"github","enabled":true,"config":{"repository":"YeTongY/dsh-superagent-prototype","cli":"gh","configDir":"/data/gh/self"}}'
+      --data '{"provider":"github","enabled":true,"config":{"repository":"owner/dsh-superagent-prototype","cli":"gh","configDir":"/data/gh/self"}}'
 
 初始化模型后，可由真实 DSH Main Session 路由一条有范围、可审查的请求，验证它能为该 fork 创建 Ticket 并启动 Worker。Worker 应使用独立 clone/worktree；运行中的 /opt/dsh-superagent 是发布目录，不能把它当作工单工作树覆盖。
 
@@ -131,7 +132,7 @@ Reporter 默认关闭。确认自己通过 loopback 或 SSH 隧道访问后，�
 
 ## 更新、备份与回滚
 
-发布新版本前，先确认没有 Executor 正在执行工作，并为当前镜像和完整持久数据目录创建可对应的备份。保留发布镜像标签；只记录源码版本或镜像摘要不足以恢复旧镜像。以下 `<旧版标签>` 和 `<新版标签>` 使用自行保存的发布记录中登记的实际标签。操作均在 911pro 的发布目录中执行，并确认 `DSH_SUPERAGENT_DATA_DIR` 指向共享数据目录。备份放到源码和 Docker 构建上下文之外，例如共享目录下的 `backups/`；不要将备份放进 `release/`。
+发布新版本前，先确认没有 Executor 正在执行工作，并为当前镜像和完整持久数据目录创建可对应的备份。保留发布镜像标签，回滚时需要用它定位旧镜像。以下 `<旧版标签>` 和 `<新版标签>` 使用受控发布记录中登记的实际标签。在宿主机的发布目录中执行操作，并确认 `DSH_SUPERAGENT_DATA_DIR` 指向共享数据目录。示例把备份放在与数据目录同级的 `backups/` 中，该目录应位于源码和 Docker 构建上下文之外。
 
 ```sh
 # 先为当前运行镜像保存不会被下一次构建覆盖的标签
@@ -139,7 +140,7 @@ docker image tag dsh-superagent:local dsh-superagent:<旧版标签>
 
 # 正常停止容器后，再备份所有持久状态
 docker compose down
-BACKUP_DIR=/home/yetongy/services/superagent-bootstrap/shared/backups
+BACKUP_DIR="$(dirname "$DSH_SUPERAGENT_DATA_DIR")/backups"
 umask 077
 install -d -m 0700 "$BACKUP_DIR"
 chmod 0700 "$BACKUP_DIR"
@@ -155,13 +156,13 @@ docker compose ps
 docker compose exec superagent /usr/local/bin/dsh-superagent-entrypoint status
 ```
 
-验证新版本健康后，将镜像标签、源码包 SHA-256、配置版本和数据备份的绝对路径记入发布记录。备份应包含完整 `data` 目录，这样 DSH profile、SQLite、Reporter 轨迹、CLI 配置和 Worker 工作目录保持为同一时间点。备份文件、`docker/runtime.env`、GH、glab 或模型凭据都不得提交到 Git、构建上下文或镜像；临时 `compose.override.yml` 也不得包含凭据。
+验证新版本健康后，将镜像标签、源码包 SHA-256、配置版本和数据备份的绝对路径记入仓库外的受控发布记录。备份应包含完整 `data` 目录，这样 DSH profile、SQLite、Reporter 轨迹、CLI 配置和 Worker 工作目录保持为同一时间点。备份文件、`docker/runtime.env`、GH、glab 或模型凭据都不得提交到 Git、构建上下文或镜像；临时 `compose.override.yml` 也不得包含凭据。
 
 需要回滚时，先停止容器并临时创建 `compose.override.yml`，将服务固定到已保留的旧镜像标签：
 
 ```sh
 docker compose down
-BACKUP_DIR=/home/yetongy/services/superagent-bootstrap/shared/backups
+BACKUP_DIR="$(dirname "$DSH_SUPERAGENT_DATA_DIR")/backups"
 BACKUP_FILE="$BACKUP_DIR/data-<旧版标签>.tar.gz"
 cat > compose.override.yml <<'EOF'
 services:
@@ -177,7 +178,7 @@ docker compose exec superagent /usr/local/bin/dsh-superagent-entrypoint status
 
 ```sh
 docker compose down
-BACKUP_DIR=/home/yetongy/services/superagent-bootstrap/shared/backups
+BACKUP_DIR="$(dirname "$DSH_SUPERAGENT_DATA_DIR")/backups"
 BACKUP_FILE="$BACKUP_DIR/data-<旧版标签>.tar.gz"
 mv "$DSH_SUPERAGENT_DATA_DIR" "${DSH_SUPERAGENT_DATA_DIR}.failed-<新版标签>"
 tar -C "$(dirname "$DSH_SUPERAGENT_DATA_DIR")" -xzf "$BACKUP_FILE"
@@ -197,6 +198,6 @@ docker compose exec superagent /usr/local/bin/dsh-superagent-entrypoint status
 | 服务状态 unhealthy | 运行 docker compose logs --tail=150 superagent 和容器内 status；Runtime error 会让健康检查失败，setup 等待不会。 |
 | profile 不完整或 bundle 来源冲突 | 先备份数据目录，检查 /data/dsh/profiles/superagent/package.json；入口会拒绝覆盖或移除任何 profile。 |
 | GH/glab 认证失败 | 在容器内用与 Source 相同的 GH_CONFIG_DIR 或 GLAB_CONFIG_DIR 运行 CLI 身份检查，并检查宿主代理、VPN、CA。 |
-| 面板或 API 无法访问 | 检查 911pro 的 127.0.0.1:3082 及本机端口转发；Compose 故意不发布端口到非 loopback 网卡。 |
+| 面板或 API 无法访问 | 先在宿主机上检查 `127.0.0.1:3082`，再检查部署环境的远程访问配置。 |
 
-宿主 VPN、DNS 和代理仍由 911pro 运维，不由镜像接管。若容器 health 通过而 Source 仍报网络或权限错误，应查看对应 CLI 与 Source 诊断；健康检查只判断 Runtime 是否可用。
+VPN、DNS 和代理由宿主机运维。若容器 health 通过而 Source 仍报网络或权限错误，应查看对应 CLI 与 Source 诊断；健康检查只判断 Runtime 是否可用。
