@@ -30,8 +30,8 @@ export const KV = {
   prompts: { revision: record<number>('prompt-revision'), version: family<PromptVersion, [revision: number]>('prompt-version:'),
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
-  /** Runtime: the main Session's ID. */
-  runtime: { masterId: record<string>('master-id') },
+  /** Runtime: historical global Session ID and completion of the one-time Feishu project attribution. */
+  runtime: { masterId: record<string>('master-id'), feishuProjectAttribution: record<true>('feishu-project-attribution') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Reporter: lightweight page/run projection; DSH owns every Session event, Inbox and transcript. */

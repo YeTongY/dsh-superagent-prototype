@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thread, type Ticket, type Trigger } from '../src/core/index.ts'
-import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
+import { backfillChat, bindFeishuProject, consumerRetry, feishuKind, feishuProjectForChat, feishuProjectForTrigger,
+  feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
@@ -91,6 +92,88 @@ function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): st
 }
 const bare = (reads: string[]) => reads.map(path => path.split('?')[0])
 describe('feishu source', () => {
+  it('resolves unique chat/project bindings and deterministic legacy single-project compatibility', () => {
+    const first = { id: 'github', provider: 'github' as const, host: 'github.com', project: 'acme/one', cli: 'gh', login: 'agent', noreply: 'agent@example.test' }
+    const second = { id: 'gitlab', provider: 'gitlab' as const, host: 'git.internal', project: 'acme/two', cli: 'glab', login: 'agent', noreply: 'agent@example.test' }
+    const deployment = testDeployment({ projects: { github: first, gitlab: second } })
+    const config = feishuKind.schema.parse({ chats: [
+      { chatId: 'oc_one', projectSourceId: 'github', listen: 'all' }, { chatId: 'oc_two', projectSourceId: 'gitlab', listen: 'mentions' },
+    ] })
+    expect(feishuProjectForChat(deployment, config.chats, 'oc_one')).toEqual({ projectSourceId: 'github' })
+    expect(feishuProjectForChat(deployment, config.chats, 'oc_two')).toEqual({ projectSourceId: 'gitlab' })
+    expect(feishuProjectForChat(deployment, config.chats, 'oc_missing')).toEqual({ error: 'project_not_bound' })
+    expect(feishuKind.schema.safeParse({ chats: [
+      { chatId: 'oc_one', projectSourceId: 'github', listen: 'all' }, { chatId: 'oc_two', projectSourceId: 'github', listen: 'all' },
+    ] }).success).toBe(false)
+    expect(feishuProjectForChat(testDeployment(), [{ chatId: 'oc_legacy', listen: 'all' }], 'oc_legacy'))
+      .toMatchObject({ projectSourceId: 'github', legacy: true })
+    expect(feishuProjectForChat(testDeployment({ projects: { github: first, gitlab: second } }),
+      [{ chatId: 'oc_legacy', listen: 'all' }], 'oc_legacy')).toEqual({ error: 'project_not_bound' })
+    expect(feishuProjectForChat(deployment, config.chats, 'oc_dm', true)).toEqual({ error: 'project_not_bound' })
+    expect(feishuProjectForChat(testDeployment({ projects: { github: first } }), config.chats, 'oc_dm', true))
+      .toMatchObject({ projectSourceId: 'github', legacy: true })
+  })
+  it('binds old single-project direct messages even when no group is configured', () => {
+    const h = host()
+    const config = feishuKind.schema.parse({ chats: [], directMessages: true })
+    const trigger = feishuTrigger({ message_id: 'om_dm', chat_id: 'oc_dm', chat_type: 'p2p', sender_id: MEMBER,
+      sender_type: 'user', content: '请检查当前项目', create_time: '1' }, 'ou_bot', 'cli_bot')!
+    const bound = bindFeishuProject(trigger, h.deployment, config, h)
+    expect(bound.meta).toMatchObject({ projectSourceId: 'github', projectBindingLegacy: true, direct: true })
+    expect(feishuProjectForTrigger(trigger, h.deployment, config, h)).toMatchObject({ projectSourceId: 'github' })
+    h.store.close()
+  })
+  it('keeps an old topic tagged to its original project and rejects replies after its chat is rebound', () => {
+    const first = { id: 'github', provider: 'github' as const, host: 'github.com', project: 'acme/one', cli: 'gh', login: 'agent', noreply: 'agent@example.test' }
+    const second = { id: 'gitlab', provider: 'gitlab' as const, host: 'git.internal', project: 'acme/two', cli: 'glab', login: 'agent', noreply: 'agent@example.test' }
+    const h = host({ deployment: testDeployment({ projects: { github: first, gitlab: second } }) })
+    const root = feishuTrigger({ message_id: 'om_root', chat_id: 'oc_shared', chat_type: 'group', sender_id: MEMBER,
+      sender_type: 'user', content: 'old project request', create_time: '1' }, 'ou_bot', 'cli_bot')!
+    // This Topic was created when the Runtime still had one project and therefore used its old unsuffixed key.
+    const old = { ...root, meta: { ...root.meta, projectSourceId: 'github' } }
+    h.store.triggers.save(old)
+    h.store.threads.save({ key: 'feishu:oc_shared:om_root', ref: old.threads[0]!, createdAt: old.at,
+      subscriptions: [], correlated: [], pending: [], meta: { projectSourceId: 'github' } })
+    const reply = feishuTrigger({ message_id: 'om_reply', chat_id: 'oc_shared', chat_type: 'group', sender_id: MEMBER,
+      sender_type: 'user', content: 'reply to the old request', create_time: '2', root_id: 'om_root', parent_id: 'om_root' }, 'ou_bot', 'cli_bot')!
+    const rebound = feishuKind.schema.parse({ chats: [{ chatId: 'oc_shared', projectSourceId: 'gitlab', listen: 'all' }] })
+    const bound = bindFeishuProject(reply, h.deployment, rebound, h)
+    expect(bound.meta).toMatchObject({ projectSourceId: 'github', projectBindingError: 'project_binding_stale' })
+    expect(bound.threads).toEqual([{ source: 'feishu', id: 'oc_shared:om_root' }])
+    expect(feishuProjectForTrigger(reply, h.deployment, rebound, h)).toEqual({
+      projectSourceId: 'github', error: 'project_binding_stale',
+    })
+    const oldUnattributed = feishuTrigger({ message_id: 'om_unattributed', chat_id: 'oc_other', chat_type: 'group', sender_id: MEMBER,
+      sender_type: 'user', content: 'historical message', create_time: '3' }, 'ou_bot', 'cli_bot')!
+    h.store.triggers.save(oldUnattributed)
+    const newlyBound = feishuKind.schema.parse({ chats: [{ chatId: 'oc_other', projectSourceId: 'gitlab', listen: 'all' }] })
+    expect(bindFeishuProject(oldUnattributed, h.deployment, newlyBound, h).meta)
+      .toMatchObject({ projectBindingError: 'project_binding_ambiguous' })
+    h.store.close()
+  })
+  it('keeps project-bound Feishu context on its trigger instead of reading a mixed physical topic', async () => {
+    const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
+    const lark = vi.spyOn(commands, 'lark')
+    const context = feishuKind.threadContext!
+    const trigger = { id: 'feishu/source', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_chat:om_source' }], actor: { source: 'feishu', id: MEMBER },
+      human: true, at: new Date().toISOString(), text: 'only this project message', meta: { chatId: 'oc_chat', messageId: 'om_source', projectSourceId: 'github' } } satisfies Trigger
+    const result = await context.read(commands, trigger, 'thread', undefined, feishuKind.schema.parse({}))
+    expect(result).toMatchObject({ status: 'project_scoped_message', messages: [{ id: 'om_source', text: 'only this project message' }] })
+    expect(lark).not.toHaveBeenCalled()
+    expect(feishuRef(trigger)).toMatchObject({ projectSourceId: 'github' })
+    expect(feishuRef(trigger)).not.toHaveProperty('projectBindingError')
+    const legacy = { ...trigger, id: 'feishu/legacy', meta: { ...trigger.meta, projectBindingLegacy: true } }
+    lark.mockResolvedValueOnce({ items: [{ message_id: 'om_source', chat_id: 'oc_chat', thread_id: 'omt_topic' }] })
+      .mockResolvedValueOnce({ thread_id: 'omt_topic', has_more: false, messages: [{ message_id: 'om_reply', chat_id: 'oc_chat',
+        content: 'same legacy topic', msg_type: 'text', sender: { id: MEMBER, sender_type: 'user' }, create_time: '1', thread_id: 'omt_topic' }] })
+    const legacyConfig = feishuKind.schema.parse({ chats: [{ chatId: 'oc_chat', listen: 'all' }] })
+    expect(await context.read(commands, legacy, 'thread', undefined, legacyConfig)).toMatchObject({ status: 'available',
+      messages: [{ id: 'om_reply', text: 'same legacy topic' }] })
+    const reboundConfig = feishuKind.schema.parse({ chats: [{ chatId: 'oc_chat', projectSourceId: 'gitlab', listen: 'all' }] })
+    expect(await context.read(commands, legacy, 'thread', undefined, reboundConfig)).toMatchObject({ status: 'project_scoped_message',
+      messages: [{ id: 'om_source', text: 'only this project message' }] })
+    expect(lark).toHaveBeenCalledTimes(2)
+  })
   it('registers its kind without a bot, and names on its health what setup still needs', async () => {
     const run = async (overrides: Partial<SourceContextDeps>) => {
       // The fixture's registry already holds the kind; this one starts empty so the plugin's registration shows.
@@ -173,7 +256,8 @@ describe('feishu source', () => {
     const live = feishuTrigger({ message_id: 'om_reply', chat_id: 'oc_dm', chat_type: 'p2p', sender_id: MEMBER, sender_type: 'user',
       content: 'and the header',
       create_time: String(Date.parse('2026-09-11 12:00')), root_id: 'om_root', thread_id: 'omt_dm' }, 'ou_bot', 'cli_bot')
-    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([{ ...live, receiptEligible: true }])
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toMatchObject([{ ...live, receiptEligible: true,
+      meta: { ...live!.meta, projectSourceId: 'github', projectBindingLegacy: true } }])
     expect(live).toMatchObject({ addressed: 'direct', threads: [{ source: 'feishu', id: 'oc_dm:om_root' }] })
     h.store.close()
   })

@@ -1,8 +1,60 @@
 /** 显式、可预览的旧 GitHub 项目迁移；失败时整个事务回滚。 */
 import type { Store } from './store.ts'
+import type { Deployment } from '../deployment.ts'
+import type { Trigger } from '../core/index.ts'
 import { projectSourceId } from '../project-source.ts'
 import { policyVersion, SettingsSchema } from '../policy.ts'
 import { KV } from '../kv.ts'
+
+/** One-time attribution of records that predate ProjectSource-aware Feishu intake. */
+export function attributeLegacyFeishuTriggers(store: Store, deployment: Deployment): void {
+  if (store.get(KV.runtime.feishuProjectAttribution)) return
+  if (Object.keys(deployment.projectProblems ?? {}).length) return
+  const [project, ...others] = Object.values(deployment.projects ?? {})
+  const settings = store.settings(), source = settings.sources.feishu
+  const chats = source?.config.chats
+  const chat = Array.isArray(chats) && chats.length === 1 ? chats[0] as { chatId?: string; projectSourceId?: string } : undefined
+  const group = chat?.projectSourceId ? undefined : chat?.chatId
+  const history = store.settingsHistory(Infinity).map(({ settings: past }) => SettingsSchema.parse(past))
+  const canAttribute = project && !others.length && source
+    && history.every(past => {
+      const repositories = Object.entries(past.sources).filter(([id, config]) => {
+        const provider = config.kind ?? id
+        return (provider === 'github' || provider === 'gitlab') && !!config.config.repository
+      })
+      return repositories.every(([id, config]) => {
+        const provider = config.kind ?? id
+        if (id !== project.id || provider !== project.provider) return false
+        try { return projectSourceId(project.provider, String(config.config.host || project.host), String(config.config.repository))
+          === projectSourceId(project.provider, project.host, project.project) }
+        catch { return false }
+      })
+    })
+  const canAttributeGroup = canAttribute && group && history.every(past => {
+    const pastChats = past.sources.feishu?.config.chats
+    return !Array.isArray(pastChats) || pastChats.every(row => row?.chatId === group && !row.projectSourceId)
+  })
+
+  store.atomic(() => {
+    if (canAttribute) {
+      // Only metadata changes. Keep domain Thread keys, input ids and platform receipts intact.
+      const update = store.db.prepare("UPDATE trigger SET value=json_set(value, '$.meta.projectSourceId', ?, '$.meta.projectBindingLegacy', json('true')) WHERE id=?")
+      const rows = store.db.prepare(`SELECT id, value FROM trigger WHERE value ->> '$.source' = 'feishu'
+        AND value ->> '$.meta.projectSourceId' IS NULL AND value ->> '$.meta.projectBindingError' IS NULL`).all()
+      for (const row of rows) {
+        const trigger = JSON.parse(String(row.value)) as Trigger
+        if (trigger.meta.direct === true ? source.config.directMessages === false : !canAttributeGroup || trigger.meta.chatId !== group) continue
+        const conflict = trigger.threads.some(ref => {
+          const suffix = /#project:([a-z0-9-]+)$/.exec(ref.id)?.[1]
+          const explicit = store.threads.get(`${ref.source}:${ref.id}`)?.meta.projectSourceId
+          return ref.source !== 'feishu' || (suffix && suffix !== project.id) || (explicit && explicit !== project.id)
+        })
+        if (!conflict) update.run(project.id, String(row.id))
+      }
+    }
+    store.set(KV.runtime.feishuProjectAttribution, true)
+  })
+}
 
 export interface ProjectMigrationPlan { source: string; target: string; records: number; cursors: number; completed: boolean; dryRun: boolean }
 export function migrateLegacyGithub(store: Store, options: { dryRun?: boolean } = {}): ProjectMigrationPlan {
@@ -13,7 +65,12 @@ export function migrateLegacyGithub(store: Store, options: { dryRun?: boolean } 
   const target = projectSourceId('github', 'github.com', legacy.config.repository)
   if (store.settings().sources[target]) throw new Error('目标项目已存在，不能覆盖已有状态')
   const ids = new Map(store.db.prepare("SELECT id FROM trigger WHERE value ->> '$.source' = 'github'").all().map(row => [String(row.id), `${target}/${String(row.id)}`]))
-  const threads = new Map(store.threads.list().filter(thread => thread.ref.source === 'github').map(thread => [thread.key, `${target}:${thread.ref.id}`]))
+  const feishuThread = (value: string) => value.replace(/^((?:feishu:)?oc_[a-zA-Z0-9]+:om_[a-zA-Z0-9_-]+#project:)github$/, `$1${target}`)
+  const threads = new Map(store.threads.list().flatMap(thread => {
+    if (thread.ref.source === 'github') return [[thread.key, `${target}:${thread.ref.id}`] as const]
+    const next = feishuThread(thread.key)
+    return thread.ref.source === 'feishu' && next !== thread.key ? [[thread.key, next] as const] : []
+  }))
   const triggerIdFields = new Set(['id', 'triggerId', 'triggerIds', 'primary', 'pending'])
   const threadKeyFields = new Set(['key', 'thread', 'threadKey', 'correlated'])
   for (const id of ids.values()) if (store.triggers.get(id)) throw new Error(`目标 Trigger 已存在：${id}`)
@@ -25,12 +82,16 @@ export function migrateLegacyGithub(store: Store, options: { dryRun?: boolean } 
   const plan: ProjectMigrationPlan = { source: 'github', target, records, cursors: cursors.length, completed: false, dryRun: options.dryRun !== false }
   if (plan.dryRun) return plan
   const policyVersions = new Map<string, string>()
-  const string = (value: string, field = ''): string => triggerIdFields.has(field) ? ids.get(value) ?? value
-    : threadKeyFields.has(field) ? threads.get(value) ?? (value.startsWith('github:') ? `${target}:${value.slice(7)}` : value) : value
+  const string = (value: string, field = ''): string => triggerIdFields.has(field) ? ids.get(value) ?? (field === 'id' ? feishuThread(value) : value)
+    : threadKeyFields.has(field) ? threads.get(value) ?? (value.startsWith('github:') ? `${target}:${value.slice(7)}` : feishuThread(value)) : value
+  const noticeName = (name: string): string => {
+    if (name === 'settings:source:github') return `settings:source:${target}`
+    return name.startsWith('subscription:') ? `subscription:${string(name.slice('subscription:'.length), 'thread')}` : name
+  }
   const rewrite = (value: unknown, field = ''): unknown => {
     if (typeof value === 'string') {
       if (field === 'policyVersion') return policyVersions.get(value) ?? value
-      return field === 'source' && value === 'github' ? target : string(value, field)
+      return (field === 'source' || field === 'projectSourceId' || field === 'projectId') && value === 'github' ? target : string(value, field)
     }
     if (Array.isArray(value)) return value.map(item => rewrite(item, field))
     if (!value || typeof value !== 'object') return value
@@ -61,11 +122,19 @@ export function migrateLegacyGithub(store: Store, options: { dryRun?: boolean } 
     for (const table of tables) {
       const primary = table === 'thread' || table === 'effect' ? 'key' : 'id'
       for (const row of store.db.prepare(`SELECT * FROM ${table}`).all()) {
-        const value = JSON.stringify(rewrite(JSON.parse(String(row.value))))
+        const rewritten = rewrite(JSON.parse(String(row.value)))
         const old = String(row[primary]), next = table === 'trigger' || table === 'disposition' ? ids.get(old) ?? old : table === 'thread' ? threads.get(old) ?? old : old
-        if (table === 'effect') store.db.prepare('UPDATE effect SET value = ? WHERE kind = ? AND key = ?').run(value, String(row.kind), old)
-        else if (table === 'decision') store.db.prepare('UPDATE decision SET value = ?, thread = ? WHERE id = ?').run(value, string(String(row.thread), 'thread'), old)
-        else store.db.prepare(`UPDATE ${table} SET ${primary} = ?, value = ? WHERE ${primary} = ?`).run(next, value, old)
+        if (table === 'effect' && row.kind === 'notice') {
+          const payload = rewritten as { name?: string; value: Record<string, unknown> }
+          const prefix = 'project:github:'
+          const key = old.startsWith(prefix) ? `project:${target}:${noticeName(old.slice(prefix.length))}` : noticeName(old)
+          if (payload.name) payload.name = noticeName(payload.name)
+          if (payload.value.settings_saved === 'source:github') payload.value.settings_saved = `source:${target}`
+          if (payload.value.read === 'settings/source:github') payload.value.read = `settings/source:${target}`
+          store.db.prepare('UPDATE effect SET key = ?, value = ? WHERE kind = ? AND key = ?').run(key, JSON.stringify(payload), 'notice', old)
+        } else if (table === 'effect') store.db.prepare('UPDATE effect SET value = ? WHERE kind = ? AND key = ?').run(JSON.stringify(rewritten), String(row.kind), old)
+        else if (table === 'decision') store.db.prepare('UPDATE decision SET value = ?, thread = ? WHERE id = ?').run(JSON.stringify(rewritten), string(String(row.thread), 'thread'), old)
+        else store.db.prepare(`UPDATE ${table} SET ${primary} = ?, value = ? WHERE ${primary} = ?`).run(next, JSON.stringify(rewritten), old)
       }
     }
     for (const row of store.db.prepare('SELECT * FROM trigger_thread').all()) store.db.prepare('UPDATE trigger_thread SET thread = ?, id = ? WHERE thread = ? AND id = ?')

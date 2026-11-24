@@ -13,7 +13,7 @@ import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyE
 import { health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
-import type { FeishuConfig } from './feishu.ts'
+import { bindFeishuProject, type FeishuConfig } from './feishu.ts'
 
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
@@ -24,7 +24,14 @@ const bot = (ctx: SourceContext): FeishuBot => {
   return resolved
 }
 async function receive(ctx: SourceContext, trigger: Trigger, receiptEligible = false): Promise<void> {
-  await ctx.receive(receiptEligible && trigger.human ? { ...trigger, receiptEligible: true } : trigger)
+  const config = enabled(ctx)
+  const bound = config ? bindFeishuProject(trigger, ctx.deployment, config, ctx) : trigger
+  await ctx.receive(receiptEligible && bound.human ? { ...bound, receiptEligible: true } : bound)
+  if (typeof bound.meta.projectSourceId === 'string' && typeof bound.meta.projectBindingError !== 'string') {
+    for (const ref of bound.threads) if (ref.source === SOURCE) ctx.threads.patch(threadKey(ref), {
+      projectSourceId: bound.meta.projectSourceId, chatId: bound.meta.chatId, rootId: bound.meta.rootId,
+    })
+  }
   const chatId = String(trigger.meta.chatId ?? '')
   if (!chatId) return
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId
@@ -241,7 +248,7 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
   }
   const direct = ctx.state.get(KV.feishu.chats)?.[ref.chatId] === true
   const since = Date.parse(thread.createdAt)
-  const root = thread.ref.id.slice(thread.ref.id.indexOf(':') + 1)
+  const root = thread.ref.id.slice(thread.ref.id.indexOf(':') + 1).replace(/#project:[a-z0-9-]+$/, '')
   let resource: string | null = `feishu/${ref.triggerId}/thread`
   while (resource) {
     if (signal?.aborted) return

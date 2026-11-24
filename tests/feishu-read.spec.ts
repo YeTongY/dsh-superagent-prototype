@@ -70,6 +70,34 @@ it('reads a topic page as messages a model reads: id, author, ISO time, text and
     messages: [{ id: 'om_reply', from: 'User', at: new Date('2026-09-11 12:00').toISOString(), text: message.content, reply_to: 'om_root',
       url: 'https://applink.feishu.cn/x' }, { id: 'om_bot', from: 'Bot', at: new Date('2026-09-11 12:00').toISOString(), text: message.content, bot: true }] })
 })
+it('does not expose a project-bound group’s mixed physical topic or surrounding chat history', async () => {
+  const lark = vi.spyOn(commands, 'lark')
+  const ref = { ...event, projectSourceId: 'github' }
+  expect(feishuReferences(ref)).not.toHaveProperty('around')
+  await expect(feishuRead(commands, ref, 'feishu/source/around', 20)).rejects.toThrow('cannot read neighbouring')
+  expect(await feishuRead(commands, ref, 'feishu/source/thread', 20))
+    .toEqual({ status: 'project_scoped_history_unavailable', messages: [], next_resource: null })
+  expect(lark).not.toHaveBeenCalled()
+})
+it('keeps legacy topic history readable only when its caller confirms the sole old group binding', async () => {
+  const lark = vi.spyOn(commands, 'lark').mockResolvedValueOnce({ items: [source] }).mockResolvedValueOnce({
+    thread_id: 'omt_thread', has_more: false, messages: [{ ...message, message_id: 'om_reply', thread_id: 'omt_thread' }],
+  })
+  const ref = { ...event, projectSourceId: 'github', projectBindingLegacy: true }
+  expect(feishuReferences(ref, true)).toHaveProperty('around', 'feishu/source/around')
+  expect(await feishuRead(commands, ref, 'feishu/source/thread', 20, true))
+    .toMatchObject({ status: 'available', messages: [{ id: 'om_reply' }] })
+  expect(lark).toHaveBeenCalledTimes(2)
+})
+it('does not expose neighbouring messages for an unbound or stale project thread', async () => {
+  const lark = vi.spyOn(commands, 'lark')
+  const ref = { ...event, projectBindingError: 'project_binding_stale' }
+  expect(feishuReferences(ref)).not.toHaveProperty('around')
+  await expect(feishuRead(commands, ref, 'feishu/source/around', 20)).rejects.toThrow('cannot read neighbouring')
+  expect(await feishuRead(commands, ref, 'feishu/source/thread', 20))
+    .toEqual({ status: 'project_scoped_history_unavailable', messages: [], next_resource: null })
+  expect(lark).not.toHaveBeenCalled()
+})
 it('reads the chat around a message by time: five before it, the message and five after, then earlier pages', async () => {
   const at = Date.parse('2026-09-11T12:00:00Z')
   const item = (n: number) => ({ message_id: `om_${n}`, chat_id: 'oc_chat', create_time: String(at + n * 1000), sender: { id: 'ou_user', sender_type: 'user' },

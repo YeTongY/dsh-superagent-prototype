@@ -92,6 +92,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   /** Validates stored and submitted configuration and fills defaults. */
   schema: z.ZodType<C>
   fields: FieldSpec[]
+  /** Optional dynamic configuration fields; used when choices depend on resolved project identities or readiness. */
+  fieldsFor?(deployment: Deployment | undefined, config: C): FieldSpec[]
   /** Health entry names owned by this kind under `health[...]`; no other kind or core loop may report them. */
   health: string[]
   /** Listening rule for a trigger (or recorded Mandate basis) of this kind; kinds without `scope` listen to everything they produce and observe none of it. */

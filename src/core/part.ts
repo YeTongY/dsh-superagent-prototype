@@ -37,14 +37,24 @@ export abstract class EnginePart {
     return inherited.admissible && inherited.strength === 'explicit' ? inherited : current
   }
   /** 领域层只比较来源给出的项目身份，不了解 GitHub/GitLab 细节。 */
-  protected assertProject(ticket: Ticket, target: ThreadRef | Trigger): void {
-    const project = this.options.scope.project?.bind(this.options.scope)
-    if (!project) return
-    const of = (value: ThreadRef | Trigger | undefined): string | undefined => {
-      if (!value) return undefined
-      return project(value.source) ?? ('meta' in value && typeof value.meta.projectSourceId === 'string' ? project(value.meta.projectSourceId) : undefined)
+  protected projectOf(value: ThreadRef | Trigger | undefined): string | undefined {
+    const source = value && this.options.scope.project?.(value.source)
+    if (!value || source) return source
+    const meta = 'meta' in value ? value.meta : this.repo.threads.get(threadKey(value))?.meta
+    const named = typeof meta?.projectSourceId === 'string' ? meta.projectSourceId : undefined
+    if (named) return this.options.scope.project?.(named)
+    if (!('meta' in value)) {
+      const suffix = /#project:([a-z0-9-]+)$/.exec(value.id)?.[1]
+      if (suffix) return this.options.scope.project?.(suffix)
     }
-    const origin = of(this.repo.triggers.get(ticket.origin.triggerId)), destination = of(target)
+    return undefined
+  }
+  protected sharesProject(ticket: Ticket, target: ThreadRef | Trigger): boolean {
+    const origin = this.projectOf(this.repo.triggers.get(ticket.origin.triggerId)), destination = this.projectOf(target)
+    return !origin || !destination || origin === destination
+  }
+  protected assertProject(ticket: Ticket, target: ThreadRef | Trigger): void {
+    const origin = this.projectOf(this.repo.triggers.get(ticket.origin.triggerId)), destination = this.projectOf(target)
     if (origin && destination && origin !== destination) throw new UserError('crossProject', { ticket: ticket.id, project: origin, target: destination })
   }
   /** The tickets whose worker decides a person's follow-up: see `followupOwners`. */

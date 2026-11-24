@@ -5,10 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { SourceScope, Trigger } from '../src/core/index.ts'
 import { Engine } from '../src/core/index.ts'
 import { Store } from '../src/app/store.ts'
-import { migrateLegacyGithub } from '../src/app/project-migration.ts'
+import { attributeLegacyFeishuTriggers, migrateLegacyGithub } from '../src/app/project-migration.ts'
 import { KV } from '../src/kv.ts'
 import { policyVersion, SettingsSchema, settingsPolicy, type Settings } from '../src/policy.ts'
 import { projectSourceId } from '../src/project-source.ts'
+import { testDeployment } from './fixtures/deployment.ts'
 
 const directories: string[] = []
 const stores: Store[] = []
@@ -40,6 +41,81 @@ function engineFor(store: Store, scope: SourceScope, now: () => string): Engine 
 }
 
 describe('旧 GitHub 项目迁移', () => {
+  it('一次性补齐只有一个历史仓库和群的旧飞书记录，保持原话题键与消息 ID', () => {
+    const dir = directory(), store = new Store(join(dir, 'db.sqlite')); stores.push(store)
+    const settings = { sources: { github: { enabled: true, config: { repository: 'acme/one' } },
+      feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'all' }] } } } }
+    store.saveSettings(settings)
+    const old = { ...legacyTrigger(1), id: 'old-feishu', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_team:om_root' }],
+      meta: { chatId: 'oc_team', messageId: 'om_root' } }
+    const other = { ...old, id: 'unbound-feishu', meta: { ...old.meta, chatId: 'oc_other' } }
+    store.triggers.save(old); store.triggers.save(other)
+    const deployment = testDeployment({ projects: { github: { id: 'github', provider: 'github', host: 'github.com', project: 'acme/one',
+      cli: '/bin/false', login: 'agent', noreply: 'agent@example.com' } } })
+    attributeLegacyFeishuTriggers(store, deployment)
+    expect(store.triggers.get(old.id)).toEqual({ ...old, meta: { ...old.meta, projectSourceId: 'github', projectBindingLegacy: true } })
+    expect(store.triggers.get(other.id)).toEqual(other)
+    expect(store.read.threadTriggers('feishu:oc_team:om_root', 10).map(item => item.id)).toContain(old.id)
+
+    const later = { ...old, id: 'later-unattributed-feishu' }
+    store.triggers.save(later)
+    attributeLegacyFeishuTriggers(store, deployment)
+    expect(store.triggers.get(later.id)).toEqual(later)
+  })
+
+  it('当前只剩一个项目时仍拒绝归属曾经存在多仓库的未标记旧飞书记录', () => {
+    const dir = directory(), store = new Store(join(dir, 'db.sqlite')); stores.push(store)
+    const github = { enabled: true, config: { repository: 'acme/one' } }
+    const feishu = { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'all' }] } }
+    const second = projectSourceId('github', 'github.com', 'acme/two')
+    store.saveSettings({ sources: { github, feishu, [second]: { kind: 'github', enabled: true, config: { repository: 'acme/two' } } } })
+    store.saveSettings({ sources: { github, feishu } })
+    const old = { ...legacyTrigger(1), id: 'old-feishu', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_team:om_root' }],
+      meta: { chatId: 'oc_team', messageId: 'om_root' } }
+    store.triggers.save(old)
+    const deployment = testDeployment({ projects: { github: { id: 'github', provider: 'github', host: 'github.com', project: 'acme/one',
+      cli: '/bin/false', login: 'agent', noreply: 'agent@example.com' } } })
+    attributeLegacyFeishuTriggers(store, deployment)
+    expect(store.triggers.get(old.id)).toEqual(old)
+  })
+
+  it('迁移飞书绑定和待投递项目，同时保留飞书消息与回执的 ID', () => {
+    const dir = directory(), store = new Store(join(dir, 'db.sqlite')); stores.push(store)
+    store.saveSettings({ sources: { github: { enabled: true, config: { repository: 'acme/one', cli: '/bin/false' } },
+      feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'all', projectSourceId: 'github' }] } } } })
+    const thread = { source: 'feishu', id: 'oc_team:om_root#project:github' }
+    const trigger = { ...legacyTrigger(1), id: 'feishu-message', source: 'feishu', actor: { source: 'feishu', id: 'ou_alice' },
+      threads: [thread], channel: { source: 'feishu', thread: 'feishu:oc_team', address: { chatId: 'oc_team', messageId: 'om_root' } },
+      meta: { projectSourceId: 'github', chatId: 'oc_team', messageId: 'om_root' } }
+    store.triggers.save(trigger)
+    store.threads.save({ key: `feishu:${thread.id}`, ref: thread, pending: [trigger.id], subscriptions: [], correlated: [], createdAt: trigger.at,
+      meta: { projectSourceId: 'github' } })
+    store.receipts.add({ id: 'feishu-reply', channel: trigger.channel, text: '收到', kind: 'reply' })
+    const insert = store.db.prepare('INSERT INTO effect (kind, key, value, seq, due, since) VALUES (?, ?, ?, ?, ?, ?)')
+    insert.run('relay', 'relay-id', JSON.stringify({ text: trigger.text, projectId: 'github' }), 1, 0, trigger.at)
+    insert.run('notice', 'subscription:github:5', JSON.stringify({ value: { subscription_changes: [{ thread: 'github:5', removed: true }] }, summary: '已取消订阅' }), 2, 0, trigger.at)
+    insert.run('notice', 'project:github:settings:source:github', JSON.stringify({ name: 'settings:source:github', projectId: 'github',
+      value: { settings_saved: 'source:github', read: 'settings/source:github' }, summary: '设置已保存' }), 3, 0, trigger.at)
+
+    const { target } = migrateLegacyGithub(store, { dryRun: false })
+    const migrated = store.triggers.get(trigger.id)
+    const threadKey = `feishu:oc_team:om_root#project:${target}`
+    expect(store.settings().sources.feishu?.config.chats).toEqual([{ chatId: 'oc_team', listen: 'all', projectSourceId: target }])
+    expect(migrated).toMatchObject({ id: trigger.id, channel: trigger.channel, meta: { projectSourceId: target },
+      threads: [{ source: 'feishu', id: `oc_team:om_root#project:${target}` }] })
+    expect(store.threads.get(threadKey)).toMatchObject({ pending: [trigger.id], meta: { projectSourceId: target } })
+    expect(store.read.threadTriggers(threadKey, 10).map(item => item.id)).toEqual([trigger.id])
+    expect(store.receipts.get('feishu-reply')).toMatchObject({ id: 'feishu-reply', channel: trigger.channel })
+    expect(store.db.prepare('SELECT value FROM effect WHERE kind = ? AND key = ?').get('relay', 'relay-id')?.value)
+      .toBe(JSON.stringify({ text: trigger.text, projectId: target }))
+    const notices = store.db.prepare("SELECT key, value FROM effect WHERE kind = 'notice' ORDER BY seq").all()
+    expect(notices.map(row => [row.key, JSON.parse(String(row.value))])).toEqual([
+      [`subscription:${target}:5`, { value: { subscription_changes: [{ thread: `${target}:5`, removed: true }] }, summary: '已取消订阅' }],
+      [`project:${target}:settings:source:${target}`, { name: `settings:source:${target}`, projectId: target,
+        value: { settings_saved: `source:${target}`, read: `settings/source:${target}` }, summary: '设置已保存' }],
+    ])
+  })
+
   it('只读预览，并原子迁移来源、Trigger、Thread、Outbox marker 和游标，再次运行保持幂等', () => {
     const dir = directory(), store = new Store(join(dir, 'db.sqlite')); stores.push(store)
     store.saveSettings({ sources: { github: { enabled: true, config: { repository: 'acme/one', cli: '/bin/false' } } },

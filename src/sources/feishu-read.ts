@@ -7,8 +7,11 @@ import { feishuRef, feishuTime, HistoricalMessageSchema, HistoryPageSchema, hist
   from './feishu-trigger.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
-/** Retained source message reference anchoring context reads; `at` is the timestamp around which `chatAround` queries. */
-export interface FeishuRef { triggerId: string; chatId: string; messageId: string; at?: string }
+/** Retained source message reference anchoring context reads; project-bound refs never expose physical-chat neighbours. */
+export interface FeishuRef {
+  triggerId: string; chatId: string; messageId: string; at?: string
+  projectSourceId?: string; projectBindingError?: string; projectBindingLegacy?: boolean; direct?: boolean
+}
 const messageId = z.string().regex(/^om_[a-zA-Z0-9_-]+$/)
 const sourceSchema = z.object({
   message_id: messageId, chat_id: z.string(), root_id: messageId.optional(), parent_id: messageId.optional(),
@@ -37,15 +40,17 @@ export async function readFeishuLink(commands: Commands, ref: FeishuRef): Promis
 }
 
 /** Resource references are anchored to an accepted trigger instead of arbitrary chat or message IDs. */
-export function feishuReferences(ref: FeishuRef) {
+export function feishuReferences(ref: FeishuRef, legacyHistoryAllowed = false) {
   const read = (section: string) => `feishu/${ref.triggerId}/${section}`
   return { skill: 'dsh-superagent-feishu', message: read('message'), root: read('root'), parent: read('parent'), thread: read('thread'),
-    around: read('around') }
+    ...projectIsolated(ref, legacyHistoryAllowed) ? {} : { around: read('around') } }
 }
+const projectIsolated = (ref: FeishuRef, legacyHistoryAllowed = false): boolean => !!ref.projectBindingError
+  || (!!ref.projectSourceId && !ref.direct && !legacyHistoryAllowed)
 
 /** Validates a model-supplied resource string before any network request; only `thread` and `around` take pagination cursors. */
 export function feishuResource(resource: string) {
-  const match = /^feishu\/([^/]+)\/(message|root|parent|thread|around)(?:\/([^/]+))?$/.exec(resource)
+  const match = /^feishu\/(.+)\/(message|root|parent|thread|around)(?:\/([^/]+))?$/.exec(resource)
   if (!match || (match[3] && match[2] !== 'thread' && match[2] !== 'around')) {
     throw new Error('Use feishu/<trigger-id>/message, /root, /parent, /thread or /around; follow returned next_resource for another page')
   }
@@ -134,12 +139,25 @@ async function chatAround(commands: Commands, ref: FeishuRef, cursor: string | u
   return { status: 'available', messages, next_resource: next }
 }
 export async function feishuRead(commands: Commands, ref: FeishuRef, resource: string,
-  pageSize: number): Promise<FeishuPage<ContextMessage> | FeishuOne<ContextMessage>> {
+  pageSize: number, legacyHistoryAllowed = false): Promise<FeishuPage<ContextMessage> | FeishuOne<ContextMessage>> {
   const request = feishuResource(resource)
   if (request.section === 'around') {
     if (request.triggerId !== ref.triggerId) throw new Error('A Feishu source trigger is required')
+    if (projectIsolated(ref, legacyHistoryAllowed)) throw new Error('Project-bound Feishu context cannot read neighbouring physical-chat messages')
     await sourceOf(commands, ref)
     return chatAround(commands, ref, request.cursor)
+  }
+  if (projectIsolated(ref, legacyHistoryAllowed) && request.section === 'thread') {
+    // Feishu exposes a topic as one physical thread, including messages written before a chat was rebound.
+    // Without durable per-message project evidence at this adapter boundary, do not expose that mixed history.
+    return { status: 'project_scoped_history_unavailable', messages: [], next_resource: null }
+  }
+  if (projectIsolated(ref, legacyHistoryAllowed) && (request.section === 'root' || request.section === 'parent')) {
+    const source = await sourceOf(commands, ref)
+    const target = request.section === 'root' ? source.root_id : source.parent_id
+    if (target && target !== source.message_id) {
+      return { status: 'project_scoped_history_unavailable', message: null }
+    }
   }
   const result = await readFeishu(commands, ref, resource, pageSize)
   if ('messages' in result) return { ...result, messages: result.messages.map(feishuView) }
@@ -150,14 +168,30 @@ function sourceRef(trigger: Trigger): FeishuRef {
   if (!ref) throw new Error('A Feishu source trigger is required')
   return ref
 }
-export const feishuThreadContext: ThreadContext<{ readPageSize: number }> = {
+interface FeishuContextConfig {
+  readPageSize: number
+  chats: readonly { chatId: string; projectSourceId?: string }[]
+}
+function legacyHistoryAllowed(ref: FeishuRef, config: FeishuContextConfig): boolean {
+  return ref.projectBindingLegacy === true && !ref.projectBindingError && config.chats.length === 1
+    && config.chats[0]!.chatId === ref.chatId && !config.chats[0]!.projectSourceId
+}
+export const feishuThreadContext: ThreadContext<FeishuContextConfig> = {
   messageId: trigger => String(trigger.meta.messageId ?? ''),
   read: async (commands, trigger, part, cursor, config) => {
     const ref = sourceRef(trigger)
+    const allowLegacyHistory = legacyHistoryAllowed(ref, config)
+    if (projectIsolated(ref, allowLegacyHistory) && part === 'thread') {
+      const message: ContextMessage = { id: ref.messageId, from: trigger.actor.id, at: trigger.at, text: trigger.text,
+        ...trigger.url ? { url: trigger.url } : {} }
+      return { messages: [message], body: { status: 'project_scoped_message', messages: [message] }, status: 'project_scoped_message' }
+    }
     const resource = `feishu/${trigger.id}/${part}${cursor ? '/' + encodeURIComponent(cursor) : ''}`
-    const body = await feishuRead(commands, ref, resource, config.readPageSize)
+    const body = await feishuRead(commands, ref, resource, config.readPageSize, allowLegacyHistory)
     if (part === 'thread' && body.status === 'no_thread') {
       // Fall back to preceding chat messages when the trigger message does not belong to a topic thread.
+      if (projectIsolated(ref, allowLegacyHistory)) return { messages: [], body: { status: 'project_scoped_history_unavailable', messages: [] },
+        status: 'project_scoped_history_unavailable' }
       const around = await chatAround(commands, ref, undefined, 5, 0)
       return { messages: around.messages, body: { status: 'chat_neighbours', messages: around.messages }, status: 'chat_neighbours' }
     }

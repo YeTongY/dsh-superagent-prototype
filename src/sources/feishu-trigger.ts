@@ -49,7 +49,11 @@ export const feishuParent = (trigger: Trigger): string | undefined =>
 export function feishuRef(trigger: Trigger): FeishuRef | undefined {
   const meta = trigger.meta as { chatId?: string; messageId?: string }
   if (trigger.source !== SOURCE || !meta.chatId || !meta.messageId) return undefined
-  return { triggerId: trigger.id, chatId: meta.chatId, messageId: meta.messageId, at: trigger.at }
+  return { triggerId: trigger.id, chatId: meta.chatId, messageId: meta.messageId, at: trigger.at,
+    ...(typeof trigger.meta.projectSourceId === 'string' ? { projectSourceId: trigger.meta.projectSourceId } : {}),
+    ...(typeof trigger.meta.projectBindingError === 'string' ? { projectBindingError: trigger.meta.projectBindingError } : {}),
+    ...(trigger.meta.projectBindingLegacy === true ? { projectBindingLegacy: true } : {}),
+    ...(trigger.meta.direct === true ? { direct: true } : {}) }
 }
 
 /** A message from the history API; a deleted message may have no body/content. */
