@@ -2,6 +2,7 @@
 import { act, useState, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
+import type { ApiResponse } from '../src/app/api.ts'
 import { ApiError, caller, usePoll } from '../src/client/api.ts'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -35,15 +36,15 @@ async function render(entry: Entry, props: Record<string, unknown>) {
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   return { container, dispose: () => { act(() => { root.unmount() }); container.remove() } }
 }
-const openMaster = async (container: HTMLElement) => {
-  const button = [...container.querySelectorAll('button')].find(item => item.textContent === zh.openMaster)!
+const clickButton = async (container: ParentNode, label: string) => {
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent === label)!
   await act(async () => { button.click() })
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
-const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+const serve = (projectOrchestrators?: ApiResponse<'GET state'>['project_orchestrators']) => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
-  if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
+  if (path === 'state') return Response.json({ masterId: 'master', project_orchestrators: projectOrchestrators, settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
@@ -63,7 +64,7 @@ it('opens a listed Session through the workspace from the main panel', async () 
   serve()
   const { ctx, main } = fixture(['master'])
   const view = await render(main, { t })
-  await openMaster(view.container)
+  await clickButton(view.container, zh.openMaster)
   expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master')
   view.dispose()
 })
@@ -72,9 +73,29 @@ it('reports a Session missing from the catalog in the interface language', async
   serve()
   const { ctx, main } = fixture([])
   const view = await render(main, { t })
-  await openMaster(view.container)
+  await clickButton(view.container, zh.openMaster)
   expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.sessionNotListed)
+  view.dispose()
+})
+
+it('opens the selected project orchestrator from the panel header', async () => {
+  serve([
+    { project_source_id: 'github-one', repository: 'acme/one', session_id: 'router-one', status: 'idle', enabled: true, ready: true },
+    { project_source_id: 'gitlab-two', repository: 'team/two', host: 'gitlab.internal', session_id: 'router-two', status: 'running', enabled: true, ready: true },
+    { project_source_id: 'github-off', repository: 'acme/off', session_id: 'router-off', status: 'missing', enabled: false, ready: false },
+  ])
+  const { ctx, main } = fixture(['master', 'router-one', 'router-two'])
+  const view = await render(main, { t })
+  await clickButton(view.container, zh.projectSessions)
+  const picker = document.querySelector('[role="dialog"]')!
+  expect(picker.textContent).toContain('acme/one')
+  expect(picker.textContent).toContain('gitlab.internal/team/two')
+  const rows = [...picker.querySelectorAll('li')]
+  await clickButton(rows[1]!, zh.openProjectSession)
+  expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('router-two')
+  expect(rows[2]!.querySelector('button')).toBeNull()
+  expect(view.container.textContent).not.toContain(zh.openMaster)
   view.dispose()
 })
 

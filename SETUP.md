@@ -63,7 +63,7 @@ GLAB_CONFIG_DIR=/absolute/path/to/project-config glab api --hostname gitlab.inte
 
 1. 请求来自哪些 GitHub/GitLab 项目，是否同时使用飞书？记录每个项目的 Provider、host、完整路径；GitHub 示例为 `owner/name`。
 2. Agent 使用哪个独立账号？推荐专用账号，平台发言和提交均能明确归属；尚未创建时列为运营者步骤。
-3. 哪些用户可以提出工作请求？推荐先只允许运营者，再逐步扩大；各项目分别配置。飞书还需确认群聊及允许名单，可先与首个群的成员保持同步。
+3. 哪些用户可以提出工作请求？推荐先只允许运营者，再逐步扩大，各项目分别配置。使用飞书时，记录每个项目对应的唯一群聊及飞书允许名单。
 4. 工单从哪个本地 clone 准备工作目录？单项目可推荐 `~/src/<name>` 下的新 clone；多项目按工单环境选择，不能共享一个固定仓库路径。
 5. 提交使用什么身份？推荐 Agent 账号；其他身份写入交付要求。
 6. 是否允许自动合并？推荐先由人工合并。GitHub 的自动合并若需另一个有权限的账号，由运营者在终端登录独立 CLI，并在交付要求中明确。GitLab 按项目权限和分支保护另行确认，不沿用 GitHub 的账号假设。
@@ -73,7 +73,7 @@ GLAB_CONFIG_DIR=/absolute/path/to/project-config glab api --hostname gitlab.inte
 - 独立 profile `superagent`，从 DSH Web profile 复制，使运行时重启不关闭运营者的其他 Session；端口 `3082`；状态目录使用 `<home>/.dsh/state/superagent` 的绝对路径。
 - 可在运营者自己的 profile 中配置每小时健康检查，故障时修复运行时。
 - 分支前缀 `agent/`，接纳模式 `observe`，先记录主动发现的工作而不自动执行，保留默认规则与提示词章节。
-- 飞书默认只读取提及，允许私信。
+- 飞书群按「仅 @」或「全部消息」接收。单项目可以启用私聊，多项目通过对应的飞书群确定项目。
 
 ## 3. 部署计划
 
@@ -83,7 +83,7 @@ GLAB_CONFIG_DIR=/absolute/path/to/project-config glab api --hostname gitlab.inte
 
 1. **人工步骤。** 阅读部署文档的账号说明，准备 CLI wrapper，再集中说明运营者需要完成的账号创建、邀请接受和 `auth login`。使用飞书时还需创建并发布机器人应用，在本机执行含密钥的 `config init`。人工步骤完成后逐一核实登录身份。
 2. **安装并启动。** 按部署文档的安装、机器配置和启动停止章节执行。当前已在本项目 checkout 内，无需重复 clone。按需准备目标项目 clone。已有 profile 时不要执行会覆盖配置的 `dsh superagent --from-default-profile`，直接编辑既有 `cordis.patch.yml`。
-3. **保存设置。** 多项目通过项目 API 注册后，按项目 ID 保存来源和策略。旧单 GitHub 可以依次保存 `github`、可选 `feishu`、`policy` 和 `executor`；飞书群 ID 先由机器人 CLI 查询。prepare 命令使用已确定的 clone 及项目环境。交付要求写明提交身份和合并方式。返回 `restarting: true` 时，等 `scripts/dsh-superagent status` 不再以状态码 1 退出，再请求下一步，并从 `GET settings` 重新读取 revision。
+3. **保存设置。** 多项目通过项目 API 注册后，按项目 ID 保存来源和策略。旧单 GitHub 可以依次保存 `github`、可选 `feishu`、`policy` 和 `executor`。在飞书来源中选择机器人已加入的群，并为每个群选择对应项目。prepare 命令使用已确定的 clone 及项目环境。交付要求写明提交身份和合并方式。返回 `restarting: true` 时，等 `scripts/dsh-superagent status` 返回 0，再从 `GET settings` 重新读取 revision。[群绑定及旧配置](docs/009-multi-project-migration.md)
 4. **处理失败。** 保存失败的响应包含 setup 问题。对照部署文档的故障排查表修复；只有无法自行解决的缺失信息或人工步骤才询问运营者。
 
 ## 5. 验证与交接
@@ -94,5 +94,6 @@ GLAB_CONFIG_DIR=/absolute/path/to/project-config glab api --hostname gitlab.inte
 
 - 面板 URL，以及侧栏 **Superagent** 入口。
 - 白名单账号如何在目标项目的 Issue 中评论 `@<agent login> <请求>`；正常情况下约一分钟内出现工单。
+- 使用飞书时，在每个绑定群中发起一次查询，核对对应项目的编排会话和原线程回复。
 - 先缩小范围、逐步减少噪声、对 Agent 的发言负责这三项运营原则。
 - 多项目部署、迁移和本地 Reporter 的阅读路径，以及本地测试与真实平台验证各自的结果。

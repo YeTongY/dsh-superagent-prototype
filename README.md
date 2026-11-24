@@ -4,7 +4,7 @@
 >
 > 上游发布版本经过整理，与其内部版本及《Exploring Super-agent Design: Towards a More Autonomous Agent System》描述的实现并不完全相同，文章中的部分设计仍属于未来方向。
 
-dsh-superagent 是基于 [DeepSeek Harness](https://www.deepseek.com/en/harness/) 的主动编码智能体，可在一个运行时接管多个 GitHub 与内网 GitLab 项目，并可选接收飞书消息。每个项目独立保存来源身份、状态、账号和执行配置；GitLab 通过 `glab` 访问，VPN 由宿主负责。授权请求会生成工单，在独立会话与目录中执行，并向原讨论交付结果。本地 Reporter 可直接测试编排行为，减少平台消息与模型调用成本。
+dsh-superagent 是基于 DeepSeek Harness 的主动编码智能体，可在一个运行时接管多个 GitHub 与内网 GitLab 项目。每个项目有独立编排会话、来源身份、状态、账号和执行配置。启用飞书时，可为每个项目指定一个专属群，群聊请求和仓库事件进入同一个编排会话，回复返回原讨论。GitLab 通过 `glab` 访问，VPN 由宿主负责。授权请求会生成工单，由 Worker 在独立会话和目录中执行。本地 Reporter 可直接验证编排行为。[DeepSeek Harness](https://www.deepseek.com/en/harness/)
 
 本项目遵循的工作原则是：**尽量少占用人的注意力，尽量多提供价值。** Agent 只在收到授权请求或团队规则允许时行动，在需要人处理或交付结果时沟通。具体原则见[设计理念](docs/000-philosophy.md)。
 

@@ -1,7 +1,7 @@
 /** Source status view (health, filtered Triggers, dropped replies) and Source settings cards. */
 import { useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
-import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
+import { usePoll, type DroppedReply, type ProjectOrchestratorView, type SourceStatusRow, type SourceView } from './api.ts'
 import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
@@ -9,7 +9,60 @@ import { usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { ConfigHistory, Fields, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
-import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
+import { CheckSetupButton, Hint, LabelValue, LoadState, Section, SessionButton, SetupMessage, StatusHead, When } from './widgets.tsx'
+
+function ProjectOrchestrators({ items }: { items: ProjectOrchestratorView[] }) {
+  const { t } = usePanel()
+  const state = (item: ProjectOrchestratorView) => !item.enabled ? t('projectSessionDisabled')
+    : !item.ready ? t('projectSessionNotReady')
+      : item.status === 'running' ? t('projectSessionRunning')
+        : item.status === 'error' ? t('projectSessionError')
+          : item.status === 'missing' ? t('projectSessionMissing') : t('projectSessionIdle')
+  return <Section title={t('projectOrchestratorsTitle')} count={items.length} hint={t('projectOrchestratorsHint')}>
+    {items.length ? <ul className="dt-list">{items.map(item => <li key={item.project_source_id} className="dt-row">
+      <Dot state={!item.enabled || !item.ready ? 'warning' : item.status === 'error' ? 'error' : item.status === 'running' ? 'ongoing' : 'done'} />
+      <div className="dt-row-main">
+        <div className="dt-row-title">{item.host ? `${item.host}/` : ''}{item.repository}<span className="dt-mono">{item.project_source_id}</span></div>
+        <div className="dt-row-meta"><Tag tone={!item.enabled || !item.ready || item.status === 'error' ? 'warning' : 'neutral'}>{state(item)}</Tag>
+          <SessionButton sessionId={item.session_id} label={t('openProjectSession')} variant="outline" />
+        </div>
+      </div>
+    </li>)}</ul> : <Hint>{t('projectOrchestratorsEmpty')}</Hint>}
+  </Section>
+}
+
+function FeishuProjectBindings({ source }: { source: SourceView }) {
+  const { t } = usePanel()
+  const rows = source.projectBindings ?? []
+  const problemLabel = (problem: NonNullable<(typeof rows)[number]['problem']>) => {
+    const keys = {
+      project_not_bound: 'projectBindingNotBound', project_not_ready: 'projectBindingNotReady',
+      project_unknown: 'projectBindingUnknown', project_binding_ambiguous: 'projectBindingAmbiguous',
+      project_binding_stale: 'projectBindingStale',
+      session_not_ready: 'projectSessionNotReady', session_disabled: 'projectSessionDisabled',
+    } as const
+    return t(keys[problem])
+  }
+  const sessionState = (session: ProjectOrchestratorView) => !session.enabled ? t('projectSessionDisabled')
+    : !session.ready ? t('projectSessionNotReady')
+      : session.status === 'running' ? t('projectSessionRunning')
+        : session.status === 'error' ? t('projectSessionError')
+          : session.status === 'missing' ? t('projectSessionMissing') : t('projectSessionIdle')
+  return <Section title={t('feishuProjectBindingsTitle')} count={rows.length} hint={t('feishuProjectBindingsHint')}>
+    {rows.length ? <ul className="dt-list">{rows.map(row => <li key={row.chat_id} className="dt-row">
+      <Dot state={row.problem ? 'warning' : 'done'} />
+      <div className="dt-row-main">
+        <div className="dt-row-title">{row.chat_name}<span className="dt-mono">{row.chat_id}</span></div>
+        <div className="dt-row-meta">
+          <LabelValue label={t('projectBindingProject')} value={row.project_label ?? t('projectBindingNotBound')} />
+          {row.problem && <Tag tone="warning">{problemLabel(row.problem)}</Tag>}
+          {row.session && <><Tag tone={row.session.status === 'error' || !row.session.enabled || !row.session.ready ? 'warning' : 'neutral'}>
+            {sessionState(row.session)}</Tag><SessionButton sessionId={row.session.session_id} label={t('openProjectSession')} /></>}
+        </div>
+      </div>
+    </li>)}</ul> : <Hint>{t('feishuProjectBindingsEmpty')}</Hint>}
+  </Section>
+}
 
 function SourceCard({ source }: { source: SourceView }) {
   const { t, call } = usePanel()
@@ -48,6 +101,7 @@ function SourceCard({ source }: { source: SourceView }) {
       </div>}
       {!source.installed && <Hint>{t('sourceNotInstalledHint')}</Hint>}
       {source.installed && source.fields.filter(spec => !spec.advanced).map(field)}
+      {source.installed && source.kind === 'feishu' && <FeishuProjectBindings source={source} />}
       {source.installed && advanced.length > 0 && <DisclosureRow icon={<Icon name="settings" />} title={t('advanced')} open={advancedOpen}
         onToggle={() => setAdvancedOpen(!advancedOpen)}>
         <div className="dt-disclosure-body">{advanced.map(field)}</div>
@@ -59,9 +113,10 @@ function SourceCard({ source }: { source: SourceView }) {
 }
 
 export function SourceSettings({ focus }: { focus?: string }) {
-  const { sources } = useSettings().settings
+  const { sources, project_orchestrators } = useSettings().settings
   useEffect(() => { if (focus) document.getElementById(`dt-source-${focus}`)?.scrollIntoView?.({ block: 'start' }) }, [focus])
   return <div className="dt-form">
+    <ProjectOrchestrators items={project_orchestrators} />
     {sources.map(source => <SourceCard key={source.id} source={source} />)}
     <ConfigHistory blocks={['source:']} />
   </div>

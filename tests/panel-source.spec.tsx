@@ -93,6 +93,37 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
   expect(server.revisions['source:github']).toBe(6)
 })
 
+it('shows project sessions and the current project binding for each Feishu chat', async () => {
+  const githubProject = 'github-0123456789abcdef01234567'
+  const gitlabProject = 'gitlab-89abcdef0123456789abcdef'
+  server.projectOrchestrators = [
+    { project_source_id: githubProject, repository: 'acme/one', host: 'github.com', session_id: 'router-one', status: 'running',
+      enabled: true, ready: true },
+    { project_source_id: gitlabProject, repository: 'team/two', host: 'gitlab.internal', session_id: 'router-two', status: 'missing',
+      enabled: true, ready: true },
+  ]
+  const current = server.settings.sources.feishu!
+  server.settings = { ...server.settings, sources: { ...server.settings.sources, feishu: { ...current, config: { ...current.config,
+    chats: [
+      { chatId: 'oc_one', projectSourceId: githubProject, listen: 'all' },
+      { chatId: 'oc_two', projectSourceId: gitlabProject, listen: 'mentions' },
+      { chatId: 'oc_unbound', listen: 'all' },
+    ] } } } }
+  await mount()
+  await click(tab(zh['tab.settings']))
+  expect(text()).toContain(zh.projectOrchestratorsTitle)
+  expect(text()).toContain('acme/one')
+  expect(text()).toContain('gitlab.internal/team/two')
+  expect(text()).toContain(zh.feishuProjectBindingsTitle)
+  expect(text()).toContain('oc_one')
+  expect(text()).toContain(githubProject)
+  expect(text()).toContain(zh.projectSessionRunning)
+  expect(text()).toContain('oc_two')
+  expect(text()).toContain(gitlabProject)
+  expect(text()).toContain(zh.projectSessionMissing)
+  expect(text()).toContain(zh.projectBindingNotBound)
+})
+
 it('shows the account each CLI signs in as, and keeps a saved CLI on screen while dsh-superagent restarts', async () => {
   await mount()
   await click(tab(zh['tab.settings']))

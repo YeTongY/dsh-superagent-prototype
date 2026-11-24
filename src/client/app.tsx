@@ -1,5 +1,6 @@
 /** Root panel shell: header with global search and glossary, top-level navigation tabs, and active route view. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import type { ApiResponse } from '../app/api.ts'
 import type { SearchView } from './api.ts'
 import { Button, Dot, Icon, Input, Modal, SegmentedTabs } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
@@ -17,7 +18,7 @@ import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers 
 import { ThreadPage } from './thread.tsx'
 import { TicketPage } from './ticket.tsx'
 import { TriggerStatus } from './trigger.tsx'
-import { When } from './widgets.tsx'
+import { SessionButton, When } from './widgets.tsx'
 
 export interface AppProps {
   t: T; openSession: (sessionId: string) => Promise<void>
@@ -98,8 +99,35 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
-function Header({ masterId }: { masterId: string | undefined }) {
-  const { t, call, openSession, notify } = usePanel()
+type ProjectOrchestrators = NonNullable<ApiResponse<'GET state'>['project_orchestrators']>
+
+function OrchestratorSessions({ projects, masterId }: { projects?: ProjectOrchestrators; masterId?: string }) {
+  const { t } = usePanel()
+  const [open, setOpen] = useState(false)
+  if (!projects) return masterId ? <SessionButton variant="outline" sessionId={masterId} label={t('openMaster')} /> : null
+  if (!projects.length) return null
+  const canOpen = ({ enabled, ready, status }: ProjectOrchestrators[number]) => enabled && ready && (status === 'idle' || status === 'running')
+  const only = projects.length === 1 ? projects[0] : undefined
+  if (only && canOpen(only)) return <SessionButton variant="outline" sessionId={only.session_id} label={t('openProjectSession')} />
+  return <>
+    <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} aria-haspopup="dialog" aria-expanded={open}
+      onClick={() => setOpen(true)}>{t('projectSessions')}</Button>
+    <Modal open={open} onClose={() => setOpen(false)} title={t('projectSessions')} closeLabel={t('close')}>
+      <ul className="dt-list">{projects.map(project => {
+        const name = [project.host, project.repository].filter(Boolean).join('/') || project.project_source_id
+        return <li key={project.project_source_id} className="dt-row">
+          <div className="dt-row-main"><div className="dt-row-title dt-event-text">{name}</div>
+            {project.error && <div className="dt-row-meta">{project.error}</div>}</div>
+          {canOpen(project) ? <SessionButton variant="outline" sessionId={project.session_id} label={t('openProjectSession')} />
+            : <span className="dt-hint">{t(!project.enabled ? 'sourceOff' : 'projectSessionUnavailable')}</span>}
+        </li>
+      })}</ul>
+    </Modal>
+  </>
+}
+
+function Header({ masterId, projects }: { masterId?: string; projects?: ProjectOrchestrators }) {
+  const { t, call, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -131,8 +159,7 @@ function Header({ masterId }: { masterId: string | undefined }) {
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
-        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
+      <OrchestratorSessions masterId={masterId} projects={projects} />
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>
@@ -160,7 +187,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   })()
   return <div className="dt-page">
     <div className="dt-column">
-      <Header masterId={state?.masterId} />
+      <Header masterId={state?.masterId} projects={state?.project_orchestrators} />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
       <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
         items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />
