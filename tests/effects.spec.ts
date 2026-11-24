@@ -147,6 +147,32 @@ it('runs an ordered kind one at a time in the order queued, and holds the later 
   expect(run.mock.calls.map(([, key]) => key)).toEqual(['first', 'first', 'first', 'second'])
 })
 
+it('preserves order and retry blocking per partition while another partition proceeds', async () => {
+  const held = deferred<void>()
+  const calls: string[] = []
+  let failFirstProject = true
+  effects.handle('relay', async (payload, key) => {
+    calls.push(key)
+    if (key === 'one-first' && failFirstProject) { await held.promise; throw new Error('project one is busy') }
+  }, { partition: payload => `project:${payload.projectId}`, limit: () => 2, retry: [1000, 1000] })
+  effects.enqueue('relay', 'one-first', { text: 'first', projectId: 'one' })
+  effects.enqueue('relay', 'one-second', { text: 'second', projectId: 'one' })
+  effects.enqueue('relay', 'two-first', { text: 'other project', projectId: 'two' })
+
+  await vi.waitFor(() => expect(calls).toEqual(['one-first', 'two-first']))
+  held.resolve()
+  await effects.idle()
+  expect(effects.pending('relay', 'one-first')).toBe(true)
+  expect(effects.pending('relay', 'one-second')).toBe(true)
+  expect(effects.pending('relay', 'two-first')).toBe(false)
+
+  failFirstProject = false
+  clock += 1000
+  await effects.idle()
+  expect(calls).toEqual(['one-first', 'two-first', 'one-first', 'one-second'])
+  expect(effects.pending('relay')).toBe(false)
+})
+
 it('keeps a quiet kind\'s failures out of its health, and asks no limit while nothing is due', async () => {
   const limit = vi.fn(() => 4)
   effects.handle('delivery', async () => { throw new Error('Session gone') }, { quiet: true, limit, retry: [1000, 1000] })

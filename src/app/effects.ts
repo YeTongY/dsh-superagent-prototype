@@ -15,10 +15,10 @@ export interface EffectPayloads {
   launch: { ticketId: string; assignmentId: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
-  /** Steer a report or a candidate into the main Session; the key is the request ID. */
-  relay: { text: string }
-  /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */
-  notice: { value: Record<string, unknown>; summary: string }
+  /** Steer a report or a candidate into its owning project Session; the key is the request ID. */
+  relay: { text: string; projectId?: string }
+  /** Inject a notice into one project Session or explicitly fan out a global notice without waking agents. */
+  notice: { name?: string; projectId?: string; allProjects?: boolean; value: Record<string, unknown>; summary: string }
   /** Send a message for a Channel through its Source; the key is the message ID, whose receipt the Outbox keeps. */
   reply: Record<string, never>
 }
@@ -31,13 +31,15 @@ interface Handler<K extends EffectKind> {
   retry: readonly [number, number]
   /** Effects run one at a time in queue order, and a failed one holds back later rows of the same kind. */
   ordered: boolean
+  /** An optional ordering key: rows preserve order and retries within one partition while other partitions continue. */
+  partition?: (payload: EffectPayloads[K], key: string) => string
   /** When true, repeated failures do not mark the effect kind's health entry as `error` (used when failures are already surfaced on a ticket). */
   quiet: boolean
 }
-type Options<K extends EffectKind> = Partial<Pick<Handler<K>, 'limit' | 'retry' | 'ordered' | 'quiet'>>
+type Options<K extends EffectKind> = Partial<Pick<Handler<K>, 'limit' | 'retry' | 'ordered' | 'quiet' | 'partition'>>
 /** `seq` preserves the row's queue position; `generation` increments on payload updates so a running attempt does not delete a newer payload. */
 interface Row { key: string; value: string; seq: number; generation: number; attempts: number; due: number }
-type Task = { kind: EffectKind; key: string; done: Promise<void> }
+type Task = { kind: EffectKind; key: string; partition?: string; done: Promise<void> }
 
 /**
  * Durable SQLite-backed queue that persists side effects inside command transactions and dispatches them after commit.
@@ -67,8 +69,8 @@ export class Effects {
   handle<K extends EffectKind>(kind: K, run: Handler<K>['run'], options: Options<K> = {}): void {
     if (this.handlers.has(kind)) throw new Error(`The ${kind} effects already have a handler`)
     this.health.set(kind, this.board.claim(kind))
-    const { limit = () => 1, retry = [2000, 60_000], ordered = false, quiet = false } = options
-    this.handlers.set(kind, { run, limit: ordered ? () => Math.min(1, limit()) : limit, retry, ordered, quiet } as unknown as Handler<never>)
+    const { limit = () => 1, retry = [2000, 60_000], ordered = false, quiet = false, partition } = options
+    this.handlers.set(kind, { run, limit: ordered ? () => Math.min(1, limit()) : limit, retry, ordered, quiet, partition } as unknown as Handler<never>)
     this.report(kind)
     this.kick()
   }
@@ -104,24 +106,49 @@ export class Effects {
     if (!this.started || this.stopped) return
     for (const [kind, handler] of this.handlers) {
       try {
-        const running = new Set([...this.tasks].filter(task => task.kind === kind).map(task => task.key))
-        // Ordered kinds block behind their oldest row even when it is not yet due; limit() is queried only after ready rows exist.
-        const rows = (handler.ordered
-          ? this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? ORDER BY seq LIMIT 1').all(kind)
-          : this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? AND due <= ? ORDER BY seq LIMIT ?')
-            .all(kind, this.now(), 16 + running.size)) as unknown as Row[]
-        const ready = handler.ordered && running.size ? [] : rows.filter(row => row.due <= this.now() && !running.has(row.key))
-        let room = ready.length ? handler.limit() - running.size : 0
-        for (const row of ready) {
-          if (room-- <= 0) break
-          this.run(kind, handler, row)
+        const active = [...this.tasks].filter(task => task.kind === kind)
+        const running = new Set(active.map(task => task.key))
+        // Ordered kinds block behind their oldest row. Partitioned kinds block only behind the oldest row for that partition.
+        const partitionOf = (row: Row) => {
+          if (!handler.partition) return undefined
+          try { return handler.partition(JSON.parse(row.value) as never, row.key) }
+          catch { return `invalid:${row.key}` }
+        }
+        const runningPartitions = new Set(active.flatMap(task => task.partition === undefined ? [] : [task.partition]))
+        const ready: { row: Row; partition?: string }[] = []
+        const now = this.now()
+        if (handler.ordered) {
+          const row = this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? ORDER BY seq LIMIT 1').get(kind) as unknown as Row | undefined
+          if (row && !running.size && row.due <= now && !running.has(row.key)) ready.push({ row })
+        } else if (handler.partition) {
+          // Stream the full queue so a long/delayed backlog in one partition cannot hide a later healthy partition.
+          const seen = new Set<string>()
+          const rows = this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? ORDER BY seq').iterate(kind) as Iterable<Row>
+          for (const row of rows) {
+            const partition = partitionOf(row)
+            if (partition !== undefined && (seen.has(partition) || runningPartitions.has(partition))) {
+              seen.add(partition)
+              continue
+            }
+            if (partition !== undefined) seen.add(partition)
+            if (row.due <= now && !running.has(row.key)) ready.push({ row, ...(partition !== undefined ? { partition } : {}) })
+          }
+        } else {
+          const rows = this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? AND due <= ? ORDER BY seq LIMIT ?')
+            .all(kind, now, 16 + running.size) as unknown as Row[]
+          for (const row of rows) if (!running.has(row.key)) ready.push({ row })
+        }
+        const room = ready.length ? Math.max(0, handler.limit() - running.size) : 0
+        for (const { row, partition } of ready.slice(0, room)) {
+          this.run(kind, handler, row, partition)
+          if (partition !== undefined) runningPartitions.add(partition)
         }
         if (this.broken.delete(kind)) this.report(kind)
       } catch (error) { this.failed(kind, error) }
     }
   }
-  private run(kind: EffectKind, handler: Handler<never>, row: Row): void {
-    const task: Task = { kind, key: row.key, done: Promise.resolve() }
+  private run(kind: EffectKind, handler: Handler<never>, row: Row, partition?: string): void {
+    const task: Task = { kind, key: row.key, ...(partition !== undefined ? { partition } : {}), done: Promise.resolve() }
     task.done = this.attempt(kind, handler, row)
       .catch((error: unknown) => { this.failed(kind, error) })
       .finally(() => { this.tasks.delete(task); this.kick() })
