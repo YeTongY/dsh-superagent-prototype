@@ -75,7 +75,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['The main Session has no tool that messages a worker', 'replies',
     ['wait for the worker\'s report, or request one with orchestrator_ticket_request_status when the ticket is idle'], ['ask the worker']],
   ['The main Session has no tool that messages a worker', 'shared', ['leave those activities to workers'], ['delegate']],
-  ['The main Session has no tool that messages a worker', 'cli', ['其余上下文读取和本地下载交由 Worker 负责'], ['delegate']],
+  ['The main Session has no tool that messages a worker', 'cli', ['其余上下文读取、本地下载和命令执行交给本项目 Worker'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'dispatch', [], ['Ask a worker']],
   ['The main Session has no tool that messages a worker', 'handoff-orchestrator', [], ['ask the worker']],
   ['The main Session has no tool that messages a worker', 'skill github', [], ['orchestrator forwarding']],

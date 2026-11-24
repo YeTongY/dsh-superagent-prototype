@@ -1,3 +1,4 @@
+import { projectOrchestratorSessionId } from '../src/app/sessions.ts'
 /** 真实 Runtime/Engine 的本地 Reporter 闭环；不调用平台消息 API 或模型。 */
 import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -14,6 +15,7 @@ import { reporterTools } from '../src/app/tools/reporter.ts'
 import { inject as runtimeInject } from '../src/index.ts'
 import { UserError, type Trigger } from '../src/core/index.ts'
 
+const githubRouterId = projectOrchestratorSessionId('github')
 let host: Host | undefined
 afterEach(async () => { await host?.stop(); host = undefined; vi.unstubAllEnvs() })
 
@@ -95,8 +97,11 @@ it('keeps Reporter off in ordinary runtime configuration', async () => {
   vi.stubEnv('DSH_SUPERAGENT_REPORTER_ENABLED', '')
   host = await startRuntime()
   expect(host.runtime.reporter).toBeUndefined()
-  expect(host.tools.get(host.runtime.masterId)?.has('orchestrator_reporter_start')).toBe(true)
-  await expect(host.runTool(host.runtime.masterId, 'orchestrator_reporter_start', { trigger_id: 'not-available', goal: '审查代码',
+  expect(host.tools.get(githubRouterId)?.has('orchestrator_reporter_start')).toBe(true)
+  const request = feishu('1', '审查代码')
+  host.runtime.receive(request)
+  await host.runtime.idle()
+  await expect(host.runTool(githubRouterId, 'orchestrator_reporter_start', { trigger_id: request.id, goal: '审查代码',
     mode: 'real-service', permissions: { read_only_service: true } })).rejects.toMatchObject({ code: 'reporter_disabled' })
 })
 
@@ -132,13 +137,13 @@ it('routes an open-ended Feishu review to Reporter first and returns a real Work
   await runtime.idle()
   expect(runtime.engine.candidate(trigger.id)).toMatchObject({ strength: 'explicit' })
 
-  const startTool = host.tools.get(runtime.masterId)!.get('orchestrator_reporter_start')!
+  const startTool = host.tools.get(githubRouterId)!.get('orchestrator_reporter_start')!
   expect(startTool.description).toContain('即使要求发现后修复')
   const startReporter = vi.spyOn(runtime.reporterRuns!, 'start')
-  await expect(host.runTool(runtime.masterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
+  await expect(host.runTool(githubRouterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
     mode: 'both', permissions: { browser: true } })).rejects.toThrow()
   expect(startReporter).not.toHaveBeenCalled()
-  const started = await host.runTool(runtime.masterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
+  const started = await host.runTool(githubRouterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
     mode: 'real-service', permissions: { read_only_service: true } }) as { run_id: string; session_id: string; project_source_id: string }
   expect(started).toMatchObject({ run_id: expect.stringMatching(/^auto-/), session_id: expect.stringMatching(/^reporter-auto-/), project_source_id: 'github' })
   expect(runtime.reporterRuns!.get(started.run_id)).toMatchObject({ goal: trigger.text, project_source_id: 'github' })
@@ -150,7 +155,7 @@ it('routes an open-ended Feishu review to Reporter first and returns a real Work
   await host.runTool(started.session_id, 'reporter_candidate', { text: '我没有同项目源码目录。请判断是否需要一个具体执行依赖；若需要，请通过原人类请求创建 Worker 任务，为本项目准备 checkout 并运行仓库已有测试命令，返回目录、revision、实际命令、退出码和失败摘要，不修改代码。' })
   await runtime.effects.idle('relay')
   const candidateRelay = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery =>
-    delivery.sessionId === runtime.masterId && delivery.text.includes('准备 checkout 并运行仓库已有测试命令'))
+    delivery.sessionId === githubRouterId && delivery.text.includes('准备 checkout 并运行仓库已有测试命令'))
   expect(candidateRelay?.text).toContain('不是 Trigger、用户授权、已确认问题或工单')
   expect(runtime.store.tickets.list()).toEqual([])
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggerCount)
@@ -162,7 +167,7 @@ it('routes an open-ended Feishu review to Reporter first and returns a real Work
   expect(runtime.store.tickets.get(ticketId)?.origin.triggerId).toBe(trigger.id)
   await runtime.idle()
   await host.runTool(`worker-${ticketId}`, 'orchestrator_report', { state: 'ready', summary: 'Worker 已为 Reporter 准备同项目 checkout，并运行仓库已有测试，返回目录、revision、实际命令和退出码；未修改代码。' })
-  await host.runTool(runtime.masterId, 'orchestrator_reporter_reply', { run_id: started.run_id, reply_id: 'worker-evidence-1',
+  await host.runTool(githubRouterId, 'orchestrator_reporter_reply', { run_id: started.run_id, reply_id: 'worker-evidence-1',
     text: 'Worker 的实际报告：已准备同项目 checkout，并运行仓库已有测试，返回了目录、revision、命令和退出码；没有修改代码。请基于这些结果继续自主审查。' })
   const returned = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery =>
     delivery.sessionId === started.session_id && delivery.text.includes('Worker 的实际报告'))
@@ -179,15 +184,15 @@ it('answers and closes a completed Feishu review when no Worker task is needed',
   const trigger = feishu('reporter-review-no-worker', '@agent-bot 审查这个项目并告诉我有没有确认的问题。')
   runtime.receive(trigger)
   await runtime.idle()
-  const started = await host.runTool(runtime.masterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
+  const started = await host.runTool(githubRouterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
     mode: 'real-service', permissions: { read_only_service: true } }) as { run_id: string }
   expect(runtime.engine.candidate(trigger.id)).toMatchObject({ strength: 'explicit' })
   await host.runTool(`reporter-${started.run_id}`, 'reporter_submit_report', { summary: '本轮未发现已确认问题。',
     full_report: '已按授权方向完成审查，没有证据充分、可提交修复的缺陷。' })
   await runtime.effects.idle('relay')
-  expect(host.deliveries.mock.calls.some(([delivery]) => delivery.sessionId === runtime.masterId
+  expect(host.deliveries.mock.calls.some(([delivery]) => delivery.sessionId === githubRouterId
     && delivery.text.includes('本轮未发现已确认问题。'))).toBe(true)
-  await host.runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: trigger.id, purpose: 'answer', text: '审查已完成，目前没有确认的问题。完整报告已保存在管理页。' })
+  await host.runTool(githubRouterId, 'orchestrator_reply', { trigger_id: trigger.id, purpose: 'answer', text: '审查已完成，目前没有确认的问题。完整报告已保存在管理页。' })
   expect(runtime.store.tickets.list()).toEqual([])
   expect(runtime.engine.candidate(trigger.id)).toBeUndefined()
   await expect(host.route({ kind: 'accept', trigger_id: trigger.id, title: '修复问题', worktree_name: 'review-findings', acknowledgement: '收到。' }))
@@ -204,12 +209,12 @@ it('ignores the original non-Feishu review candidate after Reporter reports comp
   await runtime.idle()
   expect(runtime.engine.candidate(trigger.id)).toMatchObject({ strength: 'explicit' })
 
-  const started = await host.runTool(runtime.masterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
+  const started = await host.runTool(githubRouterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
     mode: 'real-service', permissions: { read_only_service: true } }) as { run_id: string }
   await host.runTool(`reporter-${started.run_id}`, 'reporter_submit_report', { summary: 'Review complete; no confirmed issues.',
     full_report: 'The authorized review is complete. No sufficiently evidenced issue needs a ticket.' })
   await runtime.effects.idle('relay')
-  expect(host.deliveries.mock.calls.some(([delivery]) => delivery.sessionId === runtime.masterId
+  expect(host.deliveries.mock.calls.some(([delivery]) => delivery.sessionId === githubRouterId
     && delivery.text.includes('Review complete; no confirmed issues.'))).toBe(true)
 
   await host.route({ kind: 'ignore', trigger_id: trigger.id, reason: '审查完成，没有需要创建工单的已确认问题。' })
@@ -226,8 +231,8 @@ it('does not start a Reporter or route an old Feishu Trigger after answer consum
   const trigger = feishu('reporter-review-handled', '@agent-bot 审查项目里有没有问题。')
   runtime.receive(trigger)
   await runtime.idle()
-  await host.runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: trigger.id, purpose: 'answer', text: '我正在检查。' })
-  await expect(host.runTool(runtime.masterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
+  await host.runTool(githubRouterId, 'orchestrator_reply', { trigger_id: trigger.id, purpose: 'answer', text: '我正在检查。' })
+  await expect(host.runTool(githubRouterId, 'orchestrator_reporter_start', { trigger_id: trigger.id, goal: trigger.text,
     mode: 'real-service', permissions: { read_only_service: true } })).rejects.toMatchObject({ code: 'notExplicit' })
   await expect(host.route({ kind: 'accept', trigger_id: trigger.id, title: '准备代码检查结果', worktree_name: 'review-result',
     acknowledgement: '收到。' })).rejects.toThrow('answered or clarified')
@@ -268,7 +273,7 @@ it('requires critical source and screenshot GUI review while leaving investigati
   expect(systemPrompt).not.toContain('不要为了格式或清单而读取文件')
   expect(systemPrompt).not.toContain('问题判断必须依据真实用户可观察行为')
 
-  const orchestratorTools = host.tools.get(host.runtime.masterId)!
+  const orchestratorTools = host.tools.get(githubRouterId)!
   const replyTool = orchestratorTools.get('orchestrator_reporter_reply')!
   expect(replyTool.description).toContain('只处理当前分支')
   expect(replyTool.description).toContain('路线由 Reporter 自主选择')
@@ -299,7 +304,7 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
     investigation_status: 'investigating', continue_investigation: true })
   await runtime.effects.idle('relay')
   const toOrchestrator = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery =>
-    delivery.sessionId === runtime.masterId && delivery.text.includes('登录后的设置页返回空白'))
+    delivery.sessionId === githubRouterId && delivery.text.includes('登录后的设置页返回空白'))
   expect(toOrchestrator).toMatchObject({ mode: 'steer' })
   expect(toOrchestrator?.text).toContain(`candidate_id：${candidate.candidate_id}`)
   expect(toOrchestrator?.text).toContain('若是未确认疑点，Reporter 会在当前 DSH Session 继续调查同一分支')
@@ -307,7 +312,7 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggersBefore)
   expect(runtime.store.tickets.list()).toHaveLength(ticketsBefore)
 
-  await host.runTool(runtime.masterId, 'orchestrator_reporter_reply', { run_id: run.id, reply_id: 'check-reproduction',
+  await host.runTool(githubRouterId, 'orchestrator_reporter_reply', { run_id: run.id, reply_id: 'check-reproduction',
     text: '请在全新会话和已有会话中分别复现，并比较结果。' })
   const toReporter = host.deliveries.mock.calls.map(([delivery]) => delivery).find(delivery =>
     delivery.sessionId === run.session_id && delivery.text.includes('请在全新会话'))
@@ -328,7 +333,7 @@ it('exchanges Reporter findings, orchestrator replies and its free-text report t
   expect(runtime.reporterRuns!.get(run.id)).toMatchObject({ status: 'completed',
     summary: '新会话首次加载设置页时出现空白。', full_report: expect.stringContaining('已有会话没有复现') })
   expect(host.deliveries.mock.calls.map(([delivery]) => delivery).filter(delivery =>
-    delivery.sessionId === runtime.masterId && delivery.text.includes('Reporter 测试报告'))).toHaveLength(1)
+    delivery.sessionId === githubRouterId && delivery.text.includes('Reporter 测试报告'))).toHaveLength(1)
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM trigger').get()?.count)).toBe(triggersBefore)
   expect(runtime.store.tickets.list()).toHaveLength(ticketsBefore)
   expect(Number(runtime.store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get()?.count)).toBe(receiptsBefore)
@@ -350,8 +355,8 @@ it.each(['enabled', 'disabled', 'deleted'].flatMap(rule => ['followup', 'attach'
   expect(runtime.store.triggers.get(triggerId)).toMatchObject({ source: 'github', human: false, actor: { id: '' }, meta: { reporter: { kind: 'finding', confidence: 'confirmed' } } })
   expect(runtime.store.triggers.disposition(triggerId)).toMatchObject({ evalId: expect.any(String) })
   expect(runtime.store.tickets.list()).toHaveLength(0)
-  await host.runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: triggerId })
-  const accepted = await host.runTool(runtime.masterId, 'orchestrator_eval_decide', {
+  await host.runTool(githubRouterId, 'orchestrator_eval', { trigger_id: triggerId })
+  const accepted = await host.runTool(githubRouterId, 'orchestrator_eval_decide', {
     trigger_id: triggerId, decision: 'accept', title: finding.title, worktree_name: 'narrow-settings', scope: finding.body,
     reason: 'Reporter 已提供可复核的源码和截图证据。', intent_evidence: finding.evidence,
     acknowledgement: '收到，按正常工单流程处理。',
@@ -514,13 +519,14 @@ it('waits for a resumed worker turn and an idle DSH Agent after its Ticket ends'
   await runtime.pump(); await runtime.sendReplies()
 
   worker.status = 'running'
-  host.agents.get(runtime.masterId)!.status = 'idle'
+  host.agents.get(githubRouterId)!.status = 'idle'
   host.agents.delete(worker.id)
   let finished = false
   const wait = (runtime as unknown as { waitForReporterTarget(id: string, signal: AbortSignal): Promise<void> }).waitForReporterTarget
     .call(runtime, 'runtime-autonomous-wait', new AbortController().signal).then(() => { finished = true })
   await new Promise(resolve => setTimeout(resolve, 80))
   expect(finished).toBe(false)
+  host.agents.get(githubRouterId)!.status = 'idle'
   host.agents.set(worker.id, worker)
   worker.status = 'idle'
   await wait
@@ -542,7 +548,7 @@ it('isolates GitHub and GitLab requests with the same number and binds an MR thr
     policy: { ...settings.policy, sources: { ...settings.policy.sources, [id]: { allowed: [{ id: 'alice' }] } } } })
   runtime.sources.register(gitlabKind)
   const tickets: string[] = []
-  for (const [scenario, project] of [['mixed-github', 'github'], ['mixed-gitlab', id]]) {
+  for (const [scenario, project] of [['mixed-github', 'github'], ['mixed-gitlab', id]] as const) {
     reporter.registerScenario({ id: scenario!, version: 1, project_source_id: project!, thread_id: '12', thread_kind: 'pull',
       visible: { persona: '维护者', goal: '修复合并请求' }, actors: [{ id: 'alice', role: 'person' }],
       oracle: { assertions: [{ kind: 'ticket-count', count: 1 }, { kind: 'report-state', states: ['ready'] },
@@ -552,7 +558,7 @@ it('isolates GitHub and GitLab requests with the same number and binds an MR thr
       action: { kind: 'message', text: '@agent-bot 请修复这个合并请求', addressed: 'mention' } })
     await runtime.idle()
     const result = await host.route({ kind: 'accept', trigger_id: ack.trigger_id, title: '修复合并请求',
-      worktree_name: scenario, acknowledgement: '收到。' })
+      worktree_name: scenario, acknowledgement: '收到。' }, projectOrchestratorSessionId(project))
     await runtime.idle()
     tickets.push((result.ticket as { ticket_id: string }).ticket_id)
   }
@@ -578,9 +584,8 @@ it('isolates GitHub and GitLab requests with the same number and binds an MR thr
   for (const scenario of ['mixed-github', 'mixed-gitlab']) {
     expect(reporter.completeScenario(scenario)).toMatchObject({ behavioral_pass: true, delivery_pass: true, platform_pass: null })
   }
-  // 仅剩一个 GitLab 项目时，主 Session 的无前缀资源也必须绑定该项目。
-  delete runtime.deployment.projects!.github
-  await host.runTool(runtime.masterId, 'orchestrator_read', { resource: 'gitlab/merge_request/12/approvals' })
+  // GitLab 编排会话无须给资源路径添加 ProjectSource 前缀。
+  await host.runTool(projectOrchestratorSessionId(id), 'orchestrator_read', { resource: 'gitlab/merge_request/12/approvals' })
   expect(calls).toHaveLength(4)
   expect(calls.at(-1)?.project).toBe('team/widgets')
 })

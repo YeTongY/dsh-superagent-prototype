@@ -9,8 +9,9 @@ import { join } from 'node:path'
 import { vi, type Mock } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { Runtime } from '../../src/app/runtime.ts'
+import { projectOrchestratorSessionId } from '../../src/app/sessions.ts'
 import { Store } from '../../src/app/store.ts'
-import { SettingsSchema } from '../../src/policy.ts'
+import { SettingsSchema, type Settings } from '../../src/policy.ts'
 import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import { commentTrigger } from '../../src/sources/github-trigger.ts'
@@ -143,7 +144,7 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
 }
 
 /** @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored. */
-export async function startRuntime(seed?: (store: Store) => void) {
+export async function startRuntime(seed?: (store: Store) => void, configure?: (settings: Settings) => Settings) {
   const directory = mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
@@ -163,13 +164,16 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
-  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; env?: Record<string, string> }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
     const exited = { exitCode: 0, signal: null }
     const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
-    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
+    const file = spec.env?.GIT_CONFIG_GLOBAL
+    const output = argv.join(' ') === 'git config --show-origin --get-all credential.https://github.com.helper' && file
+      ? `file:${file}\t${credentialHelper(AGENT)}\n` : answers[argv.join(' ')] ?? ''
+    return { done, collected: { stdout: reader(output), stderr: reader('') } }
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
@@ -273,35 +277,50 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
     sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service }
-  const ctx = new Context()
-  for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
+  let ctx: Context
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const seeded = new Store(join(directory, 'orchestrator.sqlite'))
   const sources = { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }, feishu: { enabled: true, config: { cli: BOT } } }
   seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
+  const configured = (settings: Settings): Settings => ({ ...settings, eval: { ...settings.eval, mode: 'auto' },
+    policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT, admission: {} },
+      github: { allowed: [{ id: 'alice' }], admission: {} } } },
+    sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+  if (configure) {
+    seeded.saveSettings(SettingsSchema.parse(configure(configured(seeded.settings()))))
+    for (const [id, source] of Object.entries(seeded.settings().sources)) {
+      if ((source.kind ?? id) !== 'github' || typeof source.config.repository !== 'string') continue
+      const name = source.config.repository
+      answers[`${AGENT} api repos/${name} --jq {name: .full_name, push: .permissions.push}`] = JSON.stringify({ name, push: true })
+    }
+  }
   seed?.(seeded)
   seeded.close()
-  const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
-  await runtime.ready
-  runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
-  const settings = runtime.store.settings()
-  runtime.store.saveSettings({ ...settings, eval: { ...settings.eval, mode: 'auto' },
-    policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } },
-    sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+  const boot = async (applyDefaults = false): Promise<Runtime> => {
+    ctx = new Context()
+    for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
+    const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
+    await runtime.ready
+    runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+    if (applyDefaults) runtime.store.saveSettings(configured(runtime.store.settings()))
+    return runtime
+  }
+  let runtime = await boot(!configure)
   deliveries.mockClear()
 
   /** Parsed JSON payloads delivered to `sessionId`. */
   const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId)
     .map(call => JSON.parse(call.text) as Record<string, unknown>)
-  const candidates = () => relays(runtime.masterId).filter(item => item.kind === 'candidate').map(item => item.trigger_id)
+  const routerId = projectOrchestratorSessionId('github')
+  const candidates = (sessionId = routerId) => relays(sessionId).filter(item => item.kind === 'candidate').map(item => item.trigger_id)
   const runTool = async (sessionId: string, name: string, args: unknown) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
     return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   }
   /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
-  async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+  async function route(item: Record<string, unknown>, sessionId = routerId): Promise<Record<string, unknown>> {
+    const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
     if (results[0]!.refused) throw new Error(String(results[0]!.refused))
     return results[0]!
   }
@@ -321,11 +340,12 @@ export async function startRuntime(seed?: (store: Store) => void) {
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
   async function stop() { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
+  async function restart() { await runtime.stop(); runtime = await boot(); return runtime }
   /** The Session's model takes its next step, which takes the messages steered in since its last. */
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, restrictions, systemPrompts, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { get runtime() { return runtime }, get ctx() { return ctx }, directory, agents, tools, restrictions, systemPrompts, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop, restart, routerId,
     jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

@@ -119,11 +119,11 @@ describe('Reporter DSH Session projection', () => {
     expect(candidateRelayText).toContain('若是未确认疑点，Reporter 会在当前 DSH Session 继续调查同一分支')
     expect(candidateRelayText).toContain('不是 Trigger、用户授权、已确认问题或工单')
     expect(runs.candidate(started.session_id, '候选：需要进一步确认').candidate_id).toBe(candidate.candidate_id)
-    expect(h.host.relay).toHaveBeenLastCalledWith(candidateRelayId, expect.any(String))
+    expect(h.host.relay).toHaveBeenLastCalledWith(candidateRelayId, expect.any(String), started.project_source_id)
 
     const result = await runs.submitReport(started.session_id, '发现登录后页面返回异常。', '复现步骤：\n1. 使用测试账号登录。\n2. 打开设置页。')
     expect(result).toMatchObject({ status: 'completed', summary: '发现登录后页面返回异常。', full_report: expect.stringContaining('复现步骤') })
-    expect(h.host.relay).toHaveBeenLastCalledWith(expect.stringMatching(/^reporter-report:/), expect.stringContaining('复现步骤'))
+    expect(h.host.relay).toHaveBeenLastCalledWith(expect.stringMatching(/^reporter-report:/), expect.stringContaining('复现步骤'), started.project_source_id)
     expect(runs.contextForSession(started.session_id)).toMatchObject({ view: { summary: '发现登录后页面返回异常。' } })
     expect(context.request.idempotency_key).toBe('test-run-1')
     const reportRelayCount = vi.mocked(h.host.relay).mock.calls.length

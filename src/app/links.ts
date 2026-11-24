@@ -7,11 +7,12 @@ import type { SourceRegistry } from '../sources/registry.ts'
 import { isFeishuOrchestratorMessage } from '../core/model.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { relatedTickets, ticketCard, triggerCard } from './cards.ts'
+import { scopedTo, ticketProjectId, triggerProjectId } from './project-scope.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
 
 export interface LinkHost {
-  readonly store: Pick<Store, 'settings' | 'triggers' | 'threads' | 'tickets'>
+  readonly store: Pick<Store, 'settings' | 'triggers' | 'threads' | 'tickets' | 'read'>
   readonly links: TextCache
   readonly commands: Commands
   readonly sources: SourceRegistry
@@ -46,28 +47,45 @@ export function repliedTo({ store, sources }: { store: Pick<Store, 'triggers'>; 
   return parent === undefined ? undefined : store.triggers.get(parent)
 }
 /** Finds tickets subscribed to threads referenced in `trigger.text` (such as `#12` or URLs) that are not already in `known`. */
-function referencedTickets(host: LinkHost, trigger: Trigger, known: readonly Ticket[]): Ticket[] {
+function referencedTickets(host: LinkHost, trigger: Trigger, known: readonly Ticket[], projectId?: string): Ticket[] {
   const threads = (trigger.text.match(/#\d+|https?:\/\/[^\s)>\]]+/g) ?? []).flatMap(reference => host.sources.find(reference).threads)
   const ids = new Set(threads.flatMap(thread => host.store.threads.get(thread)?.subscriptions ?? []))
   for (const ticket of known) ids.delete(ticket.id)
-  return [...ids].flatMap(id => host.store.tickets.get(id) ?? []).slice(0, 4)
+  const scope = { projectId, deployment: host.commands.deployment, store: host.store }
+  return [...ids].flatMap(id => {
+    const ticket = host.store.tickets.get(id)
+    return ticket && scopedTo(projectId, ticketProjectId(scope, ticket)) ? [ticket] : []
+  }).slice(0, 4)
 }
 /** Builds the main Session's candidate card with routing metadata, handback history, and related or referenced tickets. */
-export async function candidateCard(host: LinkHost, candidate: Candidate) {
+export async function candidateCard(host: LinkHost, candidate: Candidate, projectId?: string) {
   const primary = candidate.triggers.at(-1)!
+  const project = projectId ?? triggerProjectId(host.commands.deployment, primary, host.store)
+  const ownsTrigger = (trigger: Trigger) => scopedTo(project, triggerProjectId(host.commands.deployment, trigger, host.store))
+  const ownsTicket = (ticket: Ticket) => scopedTo(project, ticketProjectId({ projectId: project, deployment: host.commands.deployment, store: host.store }, ticket))
+  if ((host.commands.deployment.projects && !project) || (project && !ownsTrigger(primary))) {
+    throw new Error(`Candidate ${primary.id} has no verified ProjectSource`)
+  }
+  const triggers = candidate.triggers.filter(ownsTrigger)
+  const tickets = candidate.tickets.filter(ownsTicket)
   const settings = host.store.settings()
-  const delivered = host.store.triggers.disposition(primary.id)?.fanout ?? []
-  const referenced = referencedTickets(host, primary, candidate.tickets)
+  const delivered = (host.store.triggers.disposition(primary.id)?.fanout ?? []).filter(id => {
+    const ticket = host.store.tickets.get(id)
+    return !!ticket && ownsTicket(ticket)
+  })
+  const referenced = referencedTickets(host, primary, tickets, project)
   // Triggers that a worker Session handed back as outside its ticket's scope, with the worker's reason.
-  const handedBack = candidate.triggers.flatMap(trigger => (host.store.triggers.disposition(trigger.id)?.handbacks ?? [])
+  const handedBack = triggers.flatMap(trigger => (host.store.triggers.disposition(trigger.id)?.handbacks ?? [])
+    .filter(item => { const ticket = host.store.tickets.get(item.ticketId); return !!ticket && ownsTicket(ticket) })
     .map(item => ({ trigger_id: trigger.id, ticket_id: item.ticketId, reason: item.reason })))
   // Format the primary trigger like a worker input (including the message it replies to) and summarize earlier batch triggers as cards.
-  const others = candidate.triggers.filter(trigger => trigger.id !== primary.id)
-  return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary)), strength: candidate.strength,
+  const others = triggers.filter(trigger => trigger.id !== primary.id)
+  const parent = repliedTo(host, primary)
+  return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, parent && ownsTrigger(parent) ? parent : undefined), strength: candidate.strength,
     ...(isFeishuOrchestratorMessage(primary) ? { conversation_first: true } : {}),
     ...(primary.clarificationOf ? { clarification_of: primary.clarificationOf } : {}),
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
-    ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
+    ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
     next_action: isFeishuOrchestratorMessage(primary)
       ? candidate.strength === 'explicit'

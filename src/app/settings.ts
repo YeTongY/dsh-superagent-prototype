@@ -182,9 +182,13 @@ export class Settings {
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
     const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope)
     const notified = [...effects.keys()]
+    const notifySessions = origin !== 'tool' && block !== 'source:feishu'
     store.atomic(() => {
       store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
-      if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
+      // Project Sessions cannot read the bot's global settings resource; the Feishu adapter applies new bindings to new events.
+      if (notifySessions) {
+        sessions.notify(...settingsNotice(block, changedPaths(old, settings)), block.startsWith('source:') ? block.slice(7) : undefined)
+      }
       if (before !== after) engine.policyChanged(before, after, effects)
     })
     // Rewrite worker command shims immediately when `blockedCommands` changes.
@@ -192,7 +196,7 @@ export class Settings {
     const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
     if (changed) await this.host.setup.blockCommands(blocked)
     // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
-    const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
+    const delivery = !notifySessions ? 'injected' : restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
     if (restarting) this.host.setup.restart()
     else this.host.requestPass()
     return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting, context_delivery: delivery }

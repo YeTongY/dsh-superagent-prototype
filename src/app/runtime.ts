@@ -46,9 +46,9 @@ import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
-import { feishuSettings } from '../sources/feishu.ts'
+import { bindFeishuProject as bindFeishuProjectTrigger, feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
-import { Sessions } from './sessions.ts'
+import { projectOrchestratorSessionId, Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -56,7 +56,8 @@ import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 import { reporterTools, type ReporterReadOnlyProbe } from './tools/reporter.ts'
 import type { TriggerContext } from '../sources/kind.ts'
-import { projectForTrigger } from '../project-source.ts'
+import { ticketProjectId, threadProjectId, triggerProjectId, type ProjectScopeHost } from './project-scope.ts'
+import { attributeLegacyFeishuTriggers } from './project-migration.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
@@ -195,21 +196,50 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
+      const projectSources = () => {
+        const settings = store.settings(), deployment = setup.configured() ? setup.deployment : undefined
+        return Object.entries(settings.sources).flatMap(([id, source]) => {
+          const provider = source.kind ?? id
+          if (provider !== 'github' && provider !== 'gitlab') return []
+          const resolved = deployment?.projects?.[id]
+          const legacy = !deployment?.projects && id === 'github' && !!deployment?.repository
+          const repository = resolved?.project ?? (typeof source.config.repository === 'string' ? source.config.repository : '')
+          const host = resolved?.host ?? (typeof source.config.host === 'string' ? source.config.host : provider === 'github' ? 'github.com' : undefined)
+          return [{ id, enabled: source.enabled, ready: !!resolved || legacy, repository, ...(host ? { host } : {}) }]
+        })
+      }
+      const projectIds = () => projectSources().filter(project => project.enabled && project.ready).map(project => project.id)
+      // Keep project Session identity discoverable while disabled or unready so an old Session stays restricted.
+      // Creation and message delivery still require `projectIds()` (enabled and ready).
+      const projectIdForSession = (sessionId: string) => projectSources().find(project => projectOrchestratorSessionId(project.id) === sessionId)?.id
+      const projectScope: ProjectScopeHost = { get deployment() { return setup.configured() ? setup.deployment : undefined }, store }
+      const projectForTriggerId = (id: string): string | undefined => {
+        const trigger = store.triggers.get(id)
+        return triggerProjectId(projectScope.deployment, trigger, store)
+      }
+      const projectForTicketId = (id: string): string | undefined => {
+        return ticketProjectId(projectScope, store.tickets.get(id))
+      }
+      const projectForThreadKey = (threadKey: string): string | undefined => {
+        return threadProjectId(projectScope, store.threads.get(threadKey))
+      }
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId, stateDir: machine.stateDir,
+        projectIds, projectSources, projectIdForSession, projectForTrigger: projectForTriggerId, projectForTicket: projectForTicketId,
+        projectForThread: projectForThreadKey, projectForReporter: runId => this.reporterRuns?.get(runId)?.project_source_id,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         reporter: sessionId => this.reporterRuns?.contextForSession(sessionId),
-        tools: (agent, ticket, reporterContext) => reporterContext && this.reporter && this.reporterRuns
+        tools: (agent, ticket, reporterContext, projectId) => reporterContext && this.reporter && this.reporterRuns
           ? reporterTools({ reporter: this.reporter, runs: this.reporterRuns,
             waitForTarget: (scenarioId, signal) => this.waitForReporterTarget(scenarioId, signal),
             probeReadOnly: (probe, signal) => this.probeReporterReadOnly(probe, signal) }, agent.id, reporterContext)
-          : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+          : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent, projectId) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
@@ -217,8 +247,15 @@ export class Runtime extends Service implements SourceHost {
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
+        projectForTrigger: trigger => triggerProjectId(projectScope.deployment, trigger, store),
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => this.reporterThreadContext(trigger) ?? sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        deliver: async (id, text, projectId) => {
+          if (!projectId) throw new Error('Candidate has no verifiable ProjectSource; refusing global-session delivery')
+          const project = projectSources().find(item => item.id === projectId)
+          const label = project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository ?? projectId
+          await sessions.ensureProjectOrchestrator(projectId, machine.stateDir, `dsh-superagent orchestrator ${label}`)
+          await sessions.prompt(projectOrchestratorSessionId(projectId), id, text, 'steer')
+        }, candidateCard: (candidate, projectId) => candidateCard(links, candidate, projectId) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused(),
         capture: message => this.reporter?.capture(message) ?? false })
       const { assessor, executor } = this
@@ -228,12 +265,19 @@ export class Runtime extends Service implements SourceHost {
           if (this.reporter) store.afterCommit(() => this.reporter?.observe(event))
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
-          if (notice) sessions.notify(...notice)
+          if (notice) {
+            const eventProject = event.type === 'ticket.ended' ? projectForTicketId(event.data.ticketId)
+              : event.type === 'trigger.requeued' ? projectForTriggerId(event.data.triggerId)
+                : event.type === 'thread.unsubscribed' && event.data.ticketId ? projectForTicketId(event.data.ticketId)
+                  : event.type === 'thread.unsubscribed' ? projectForThreadKey(event.data.threadKey) : undefined
+            sessions.notify(...notice, eventProject ?? '__unresolved__')
+          }
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
           // and of one for an ended ticket once it resumes, unless it routed the message there itself.
-          const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
-          const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
-          if (followup) sessions.relay(followup.id, followup.text)
+          const followedTrigger = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
+            ? event.data.triggerId : undefined
+          const followup = followedTrigger ? followupNotice(store, sources, followedTrigger) : undefined
+          if (followup && followedTrigger) sessions.relay(followup.id, followup.text, projectForTriggerId(followedTrigger) ?? '__unresolved__')
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
@@ -287,10 +331,9 @@ export class Runtime extends Service implements SourceHost {
             const directory = ticket?.execution?.directory
             if (!directory || !existsSync(directory)) return undefined
             try { if (!statSync(directory).isDirectory()) return undefined } catch { return undefined }
-            const origin = store.triggers.get(ticket.origin.triggerId)
-            const project = projectForTrigger(setup.deployment, origin)
-            if (!project) return undefined
-            return { id, projectSourceId: project.id, directory }
+            const projectSourceId = projectForTicketId(id)
+            if (!projectSourceId) return undefined
+            return { id, projectSourceId, directory }
           },
           ensureSession: (sessionId, workspace, title) => sessions.ensureReporter(sessionId, workspace, title),
           promptSession: (sessionId, requestId, text, mode, authorize) => sessions.prompt(sessionId, requestId, text, mode, authorize),
@@ -302,29 +345,36 @@ export class Runtime extends Service implements SourceHost {
             await ctx.sessionPersistence.flush()
           },
           sessionStatus: sessionId => ctx.agents.get(sessionId as SessionId)?.status ?? 'missing',
-          relay: (requestId, text) => sessions.relay(requestId, text),
+          relay: (requestId, text, projectId) => sessions.relay(requestId, text, projectId),
           submitFinding: trigger => this.receive(trigger),
           ...(browser ? { browser } : {}), lifetime: this.lifetime, now })
       }
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => this.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         sourceContext: ticket => {
-          const origin = sourceTrigger(this, ticket)
-          const project = projectForTrigger(setup.deployment, origin)
-          return this.context({ kind: project?.provider ?? 'github', id: project?.id ?? 'github', health: [] })
+          const id = projectForTicketId(ticket.id)
+          const project = id ? setup.deployment.projects?.[id] : undefined
+          return this.context({ kind: project?.provider ?? (id === 'gitlab' ? 'gitlab' : 'github'), id: id ?? 'github', health: [] })
         },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
-        ...(this.reporterRuns ? { replyReporter: (runId: string, replyId: string, text: string) => this.reporterRuns!.reply(runId, replyId, text) } : {}),
-        startReporter: async (triggerId: string, request: ReporterAutonomousRunStartRequest) => {
+        ...(this.reporterRuns ? { replyReporter: async (runId: string, replyId: string, text: string, expectedProjectId?: string) => {
+          const run = this.reporterRuns!.get(runId)
+          if (!expectedProjectId || !run || run.project_source_id !== expectedProjectId || !projectIds().includes(expectedProjectId)) {
+            throw new UserError('crossProject', { expected: expectedProjectId ?? '', actual: run?.project_source_id ?? '' })
+          }
+          await this.reporterRuns!.reply(runId, replyId, text)
+        } } : {}),
+        startReporter: async (triggerId: string, request: ReporterAutonomousRunStartRequest, expectedProjectId?: string) => {
           if (!this.reporterRuns) throw new ReporterAutonomousRunError(404, 'reporter_disabled', '自主 Reporter 未启用')
           const trigger = store.triggers.get(triggerId)
           if (!trigger?.human || engine.candidate(triggerId)?.strength !== 'explicit') throw new UserError('notExplicit')
-          const project = projectForTrigger(setup.deployment, trigger)
-          const projectSource = project?.id ?? (!setup.deployment.projects && setup.deployment.repository ? 'github' : undefined)
-          if (!projectSource) throw new UserError('notAdmissible', { reason: 'the Trigger has no configured ProjectSource' })
+          const projectSource = projectForTriggerId(triggerId)
+          if (!expectedProjectId || projectSource !== expectedProjectId || !projectIds().includes(expectedProjectId)) {
+            throw new UserError('crossProject', { expected: expectedProjectId ?? '', actual: projectSource ?? '' })
+          }
           return this.reporterRuns!.start({ ...request, idempotency_key: key('reporter-review', triggerId), project_source_id: projectSource })
         },
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
@@ -364,7 +414,14 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
-  receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  receive(trigger: Trigger): ReceiveResult { return this.passes.receive(this.bindProjectIdentity(trigger)) }
+  /** Revalidates project attribution at Runtime ingress so every Feishu receive/replay path uses the same trusted binding. */
+  private bindProjectIdentity(trigger: Trigger): Trigger {
+    if (trigger.source !== 'feishu' || !this.setup.configured()) return trigger
+    const config = feishuSettings(this.sources)
+    return bindFeishuProjectTrigger(trigger, this.setup.deployment, config,
+      this.context({ kind: 'feishu', id: 'feishu', health: [] }))
+  }
   private reporterThreadContext(trigger: Trigger): TriggerContext | undefined {
     if (!this.reporter || trigger.channel?.source !== 'local-reporter') return undefined
     return { messageId: trigger.id, images: () => [], image: async () => { throw new Error('Reporter 没有图片附件') },
@@ -422,6 +479,11 @@ export class Runtime extends Service implements SourceHost {
       }
       return { scenario, triggerIds, evalIds, ticketIds }
     }
+    const projectId = readTargets().scenario.simulator.project_source_id
+    const project = this.sessions.projectOrchestrators().find(item => item.project_source_id === projectId)
+    const projectLabel = project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository ?? projectId
+    const orchestratorSessionId = projectOrchestratorSessionId(projectId)
+    await this.sessions.ensureProjectOrchestrator(projectId, this.machine.stateDir, `dsh-superagent orchestrator ${projectLabel}`)
     const targetWorkerSessions = (state: TargetState) => new Set([...state.ticketIds].map(id => workerSessionId(id)))
     const isChildOf = (sessionId: string, roots: ReadonlySet<string>): boolean => {
       let parent = this.reporterSessionParents.get(sessionId) ?? this.ctx.agents.get(sessionId as SessionId)?.session.header.parentSession
@@ -432,11 +494,11 @@ export class Runtime extends Service implements SourceHost {
       return false
     }
     const candidateMessages = new Set<string>()
-    const masterChildren = new Set<string>(), masterTurns = new Set<number>()
+    const orchestratorChildren = new Set<string>(), orchestratorTurns = new Set<number>()
     let targetFailed = false
     const isTargetWorkerSession = (sessionId: string, state: TargetState) => targetWorkerSessions(state).has(sessionId)
     const isTargetWorkerChild = (sessionId: string, state: TargetState) => isChildOf(sessionId, targetWorkerSessions(state))
-    const isTargetMasterChild = (sessionId: string) => masterChildren.has(sessionId)
+    const isTargetOrchestratorChild = (sessionId: string) => orchestratorChildren.has(sessionId)
     const disposers: (() => void)[] = []
     const candidatePromptIds = (state: TargetState) => {
       for (const evalId of state.evalIds) candidateMessages.add(this.sessions.promptedId(`candidate:${evalId}`))
@@ -444,24 +506,24 @@ export class Runtime extends Service implements SourceHost {
     const disposeClaimed = this.ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       try {
         candidatePromptIds(readTargets())
-        if (agent.id === this.masterId && candidateMessages.has(message.id)) masterTurns.add(turn)
+        if (agent.id === orchestratorSessionId && candidateMessages.has(message.id)) orchestratorTurns.add(turn)
       } catch { /* The scenario may be removed while a Session is claiming a message. */ }
     })
     disposers.push(disposeClaimed)
     const disposeSessionEvent = this.ctx.on('session/event', (session, event) => {
-      if (session.id === this.masterId && event.type === 'turn/end') masterTurns.delete(event.data.turn)
+      if (session.id === orchestratorSessionId && event.type === 'turn/end') orchestratorTurns.delete(event.data.turn)
     })
     disposers.push(disposeSessionEvent)
     const disposeCreated = this.ctx.on('agent/created', ({ agent }) => {
       const parent = agent.session.header.parentSession
-      if (parent && (parent === this.masterId && masterTurns.size > 0 || isTargetMasterChild(parent))) masterChildren.add(agent.id)
+      if (parent && (parent === orchestratorSessionId && orchestratorTurns.size > 0 || isTargetOrchestratorChild(parent))) orchestratorChildren.add(agent.id)
     })
     disposers.push(disposeCreated)
     const disposeError = this.ctx.on('agent/error', ({ agent, turn }) => {
       try {
         const state = readTargets()
         if (isTargetWorkerSession(agent.id, state) || isTargetWorkerChild(agent.id, state)
-          || (agent.id === this.masterId && masterTurns.has(turn)) || isTargetMasterChild(agent.id)) targetFailed = true
+          || (agent.id === orchestratorSessionId && orchestratorTurns.has(turn)) || isTargetOrchestratorChild(agent.id)) targetFailed = true
       } catch { /* Ignore failures that cannot be tied to this Reporter scenario. */ }
     })
     disposers.push(disposeError)
@@ -521,8 +583,8 @@ export class Runtime extends Service implements SourceHost {
           const reportPredatesDelivery = !!assignment?.deliveredAt && !!report && assignment.deliveredAt >= report.at
           if (undelivered || !report || report.state === 'progress' || reportPredatesDelivery || !agent || agent.status !== 'idle') pending = true
         }
-        const master = this.ctx.agents.get(this.masterId as SessionId)
-        if (!master || master.status !== 'idle') pending = true
+        const orchestrator = this.ctx.agents.get(orchestratorSessionId as SessionId)
+        if (!orchestrator || orchestrator.status !== 'idle') pending = true
         if (targetFailed) throw Object.assign(new Error('A target DSH session failed'), { code: 'target_agent_error' })
         if (pending) quietPasses = 0
         else quietPasses++
@@ -574,9 +636,16 @@ export class Runtime extends Service implements SourceHost {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
     }
+    if (this.closing()) return
+    attributeLegacyFeishuTriggers(this.store, this.setup.deployment)
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    // Restore projects independently: one Session/preset failure must not delay every other ready ProjectSource.
+    await Promise.all(this.sessions.projectOrchestrators().filter(project => project.enabled && project.ready).map(async project => {
+      const label = project.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project.repository
+      try { await this.sessions.ensureProjectOrchestrator(project.project_source_id, this.machine.stateDir, `dsh-superagent orchestrator ${label}`) }
+      catch { /* The per-project status records the safe failure code; its owning effects retry setup on demand. */ }
+    }))
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -603,8 +672,10 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
+      await this.sessions.settleProjectOrchestratorEnsures()
       await this.reporterRuns?.closeBrowsers()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id)),
+      const ids = [this.masterId, ...this.sessions.projectSessionIds(),
+        ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id)),
         ...this.reporterRuns?.list().map(run => run.session_id) ?? []]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })

@@ -20,6 +20,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   const gate = { issue: undefined as Promise<void> | undefined }
   const commands = {
     repository: 'acme/widgets', deployment: testDeployment(),
+    forSource: vi.fn(() => commands),
     withSignal() { return commands },
     gh: vi.fn(async (args: string[]) => {
       await gate.issue
@@ -42,6 +43,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
     get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
     effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
+    projectForTrigger: () => 'github',
   }
   const assessor = new MasterAssessor(host)
   const policy: Policy = { version: 'v1', paused: false, evalTimeoutMs: 600_000, gate: () => ({ admissible: true, strength, basis: { via: 'followup' } }),

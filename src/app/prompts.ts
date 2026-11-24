@@ -97,10 +97,13 @@ export function policySection(settings: Settings, config: PromptConfig = default
   return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
 }
 /**
- * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
- * and, last, the main Session's generated Policy section, which nothing follows, and whose change leaves the rest unchanged.
+ * Assemble a role's system prompt sections from fixed templates, team sections, the execution environment, and generated
+ * policy and ProjectSource scope sections for an Orchestrator Session.
  */
-export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }) {
+function projectScopeSection(projectId: string) {
+  return `当前编排会话绑定到 ProjectSource ${JSON.stringify(projectId)}。Runtime 会校验本会话读取、路由、回复、Reporter 协作和项目设置操作的归属。读取项目数据只能使用受限的编排工具；不得选择或访问其他 ProjectSource。`
+}
+export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, projectId?: string) {
   // A built-in part names the key its text is overridden by, which for the handoff names the role.
   const fixed = (name: string, part = name) => ({ name, kind: 'fixed' as const, key: part, text: builtIn(config, part as PartKey) })
   const team = (name: TeamSection) => ({ name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`,
@@ -112,11 +115,13 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
     ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
     fixed('runtime/handoff', `runtime/handoff/${role}`),
     ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : [],
+    ...role === 'orchestrator' && projectId ? [{ name: 'runtime/project-scope', kind: 'generated' as const,
+      key: 'runtime/project-scope', text: projectScopeSection(projectId) }] : [],
     ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : [],
   ].filter(part => part.text)
 }
-export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
-  return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
+export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, projectId?: string): string {
+  return promptParts(config, role, environment, policy, projectId).map(part => part.text).join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
   return Object.hasOwn(sourceSkills, name) ? builtIn(config, `skill/${name}` as PartKey) : config.skills[name] ?? ''
@@ -140,8 +145,8 @@ export class Prompts {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
-  compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+  compose(config: PromptConfig, role: Role, variables = this.environment(), projectId?: string): string {
+    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined, projectId)
   }
   /** Returns skills to register in every Session: configured Source skills, followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
@@ -194,11 +199,11 @@ export class Prompts {
       return [{ part, base, ...previous === undefined ? {} : { previous } }]
     })
   }
-  preview(value: unknown) {
+  preview(value: unknown, projectId?: string) {
     const config = this.validate(value)
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
-    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
-      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
+    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy, projectId), worker: composePrompt(config, 'worker', environment),
+      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy, projectId), worker: promptParts(config, 'worker', environment) },
       skills: Object.fromEntries(this.skills(config)), scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {

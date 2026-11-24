@@ -8,7 +8,7 @@ import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
-import type { DecisionRow, DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
+import type { DecisionRow, DroppedReply, HistoryView, Problem, ProjectOrchestratorView, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
@@ -101,6 +101,7 @@ export interface PanelServer {
   queued: Set<string>
   searching?: (query: string) => Promise<void>
   setup: SetupView
+  projectOrchestrators: ProjectOrchestratorView[]
   health: Record<string, Health>
   /** When true, all API requests return an empty 404 to simulate the host plugin being stopped. */
   down: boolean
@@ -136,12 +137,25 @@ function sourceSettings(): SourceView[] {
       health: server.health[`sync:${kind.kind}`] }
     const policy = kind.policy && { fields: kind.policy.fields, explicit: kind.policy.explicit, ...kind.policy.rows
       ? { rows: kind.policy.rows(config) } : {}, ...sync ? { sync } : {} }
+    const projectOrchestrators = server.projectOrchestrators
+    const chatLabels = { oc_team: '团队群', oc_other: '另一个群', ...server.joined }
+    const projectBindings = kind.kind === 'feishu' && Array.isArray(config.chats)
+      ? config.chats.map(value => {
+        const chat = value as { chatId: string; name?: string; projectSourceId?: string }
+        const session = chat.projectSourceId && projectOrchestrators.find(item => item.project_source_id === chat.projectSourceId)
+        const problem = !chat.projectSourceId ? 'project_not_bound' as const : !session || !session.ready ? 'project_not_ready' as const
+          : !session.enabled ? 'session_disabled' as const : undefined
+        return { chat_id: chat.chatId, chat_name: chat.name || chatLabels[chat.chatId as keyof typeof chatLabels] || chat.chatId,
+          ...(chat.projectSourceId ? { project_source_id: chat.projectSourceId, project_label: chat.projectSourceId } : {}),
+          ...(problem ? { problem } : {}), ...(session ? { session } : {}) }
+      }) : undefined
     return { id: kind.kind, kind: kind.kind, title: kind.title, description: kind.description, installed: true,
       value: { enabled: server.settings.sources[kind.kind]?.enabled ?? true, config },
         revision: server.revisions[`source:${kind.kind}`] ?? 0,
       restarts: SETUP_FIELDS[kind.kind] ?? [], fields: kind.fields, facts: kind.facts?.(resolved()) ?? {},
-      labels: kind.kind === 'feishu' ? { oc_team: '团队群', oc_other: '另一个群', ...server.joined } : {}, ...problem ? { problem } : {},
-      ...policy ? { policy } : {} }
+      labels: kind.kind === 'feishu' ? chatLabels : {},
+      ...(projectBindings ? { projectBindings } : {}), ...problem ? { problem } : {},
+      ...policy ? { policy } : {} } as SourceView
   })
 }
 function sourceStatuses(): SourceStatusRow[] {
@@ -161,12 +175,13 @@ function sourceStatuses(): SourceStatusRow[] {
 }
 const stateView = (): StateView => ({
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: 'master', paused: server.settings.paused,
+  masterId: 'master', paused: server.settings.paused, project_orchestrators: server.projectOrchestrators,
   // The panel does not read health; the service script does.
   health: {},
 })
 const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
+  project_orchestrators: server.projectOrchestrators,
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
     executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
@@ -249,7 +264,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [], projectOrchestrators: [],
     reporter: { enabled: false, runs: [] },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
@@ -258,7 +273,7 @@ function initial(): PanelServer {
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
-      defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
+      defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], project_orchestrators: [], notificationPending: false, next_offset: null },
     tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() },
     threads: [threadSummary()], decisions: [acceptDecision()], threadPages: threadPage,
     person: [ticketSummary({ attention: { id: 'q1', question: '需要确认按钮颜色' }, note: { text: '需要确认按钮颜色', error: false }, reply },

@@ -8,10 +8,10 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { projectOrchestratorSessionId } from '../src/app/sessions.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
-import { masterPrompt } from '../src/app/context.ts'
 import { reference, testMachine } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
@@ -36,6 +36,7 @@ import { decisionList, search, threadDetail, threadList } from '../src/app/views
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 
 let runtime: Runtime
+const routerId = projectOrchestratorSessionId('github')
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
 const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
 let directory: string
@@ -128,13 +129,13 @@ function github(id: string, text: string): Trigger {
 const worktreeName = 'fix-regression'
 /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+  const { results } = await runTool(routerId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
 async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   await receive(trigger)
-  expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
+  expect(relays(routerId).some(item => item.trigger_id === trigger.id)).toBe(true)
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
     worktree_name: worktreeName, acknowledgement: '收到，修复回归。' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
@@ -224,7 +225,7 @@ afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await 
 
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
-  const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!
+  const candidate = relays(routerId).find(item => item.kind === 'candidate')!
   expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, conversation_first: true,
     next_action: expect.stringContaining('执行范围明确') })
   expect(ticket).toMatchObject({ title: '修复回归', mandate: { strength: 'explicit', basis: expect.objectContaining({ via: 'addressed', source: 'feishu', sender: 'Alice', addressed: 'mention', scope: expect.objectContaining({ chatId: CHAT }) }) },
@@ -267,11 +268,11 @@ it('keeps Feishu clarification in the same human thread and does not grant it to
   const request = feishu('41', '@bot 帮我修复一下')
   await receive(request)
   expect(runtime.store.tickets.list()).toEqual([])
-  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: request.id, purpose: 'clarify', text: '你希望修复哪一个页面？' })
+  await runTool(routerId, 'orchestrator_reply', { trigger_id: request.id, purpose: 'clarify', text: '你希望修复哪一个页面？' })
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.clarification).toEqual({ triggerId: request.id, actor: request.actor })
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.evaluating).toBeUndefined()
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_41`)).toContainEqual(expect.objectContaining({ kind: 'ignore', reason: [{ code: 'clarificationAsked', triggerId: request.id }] }))
-  const stale = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: request.id,
+  const stale = await runTool(routerId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: request.id,
     title: '修复登录', worktree_name: 'fix-login', acknowledgement: '收到，我来修复登录。' }] }) as { results: { refused?: string }[] }
   expect(stale.results[0]?.refused).toContain('answered or clarified')
 
@@ -291,7 +292,7 @@ it('keeps Feishu clarification in the same human thread and does not grant it to
   expect(runtime.store.triggers.get(continuation.id)).toMatchObject({ clarificationOf: request.id })
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_41`)?.clarification).toBeUndefined()
   expect(runtime.store.triggers.disposition(continuation.id)?.fanout).toEqual([])
-  const candidate = relays(runtime.masterId).find(item => item.trigger_id === continuation.id)
+  const candidate = relays(routerId).find(item => item.trigger_id === continuation.id)
   expect(candidate).toMatchObject({ strength: 'explicit', conversation_first: true, clarification_of: request.id })
 
   await route({ kind: 'accept', trigger_id: continuation.id, title: '修复登录页面', worktree_name: 'fix-login-page', acknowledgement: '收到，我来修复登录页面。' })
@@ -310,7 +311,7 @@ it('revalidates an unlisted addressed Feishu clarification from the original adm
   const request = feishu('51', '@bot 修一下登录页', { sender_id: 'ou_guest' })
   await receive(request)
   expect(runtime.engine.candidate(request.id)?.strength).toBe('explicit')
-  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: request.id, purpose: 'clarify', text: '具体是哪个页面？' })
+  await runTool(routerId, 'orchestrator_reply', { trigger_id: request.id, purpose: 'clarify', text: '具体是哪个页面？' })
   const continuation = feishu('52', '登录页', { mentions: [], root_id: 'om_51', sender_id: 'ou_guest' })
   await receive(continuation)
   expect(runtime.store.triggers.get(continuation.id)).toMatchObject({ clarificationOf: request.id })
@@ -336,8 +337,8 @@ it('answers a Feishu status query in an existing ticket thread without waking or
   await receive(query)
   expect(runtime.store.triggers.disposition(query.id)?.fanout).toEqual([])
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: ended.ended, assignments: [{ id: ended.assignments[0]!.id }] })
-  expect(relays(runtime.masterId).some(item => item.trigger_id === query.id && item.conversation_first === true)).toBe(true)
-  expect(await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '这项工作目前暂未复现。' })).toMatchObject({ status: 'sent' })
+  expect(relays(routerId).some(item => item.trigger_id === query.id && item.conversation_first === true)).toBe(true)
+  expect(await runTool(routerId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '这项工作目前暂未复现。' })).toMatchObject({ status: 'sent' })
   expect(runtime.store.tickets.get(ticket.id)?.ended).toEqual(ended.ended)
 })
 
@@ -347,12 +348,12 @@ it('ends an answered Feishu query Eval and starts a newer request queued behind 
   const newer = feishu('48', '@bot 修复登录问题', { root_id: 'om_47' })
   runtime.receive(newer)
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_47`)?.pending).toContain(newer.id)
-  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '消息已收到，机器人当前可以回复。' })
+  await runTool(routerId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '消息已收到，机器人当前可以回复。' })
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_47`)?.evaluating?.triggerIds).toContain(newer.id)
   expect(runtime.store.tickets.list()).toEqual([])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_47`)).toContainEqual(expect.objectContaining({ kind: 'ignore',
     reason: [{ code: 'answeredByOrchestrator', triggerId: query.id }] }))
-  const stale = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: query.id,
+  const stale = await runTool(routerId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: query.id,
     title: '连接问题', worktree_name: 'check-feishu', acknowledgement: '收到，我来检查连接。' }] }) as { results: { refused?: string }[] }
   expect(stale.results[0]?.refused).toContain('answered or clarified')
 })
@@ -368,9 +369,9 @@ it('does not let a Feishu message create work after its Eval was already release
   expect(runtime.store.threads.get(threadKey)?.evaluating).toBeUndefined()
   expect(runtime.store.decisions.byThread(threadKey).at(-1)?.reason).toEqual([{ code: 'timeout' }])
 
-  await runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '机器人可以正常回复。' })
+  await runTool(routerId, 'orchestrator_reply', { trigger_id: query.id, purpose: 'answer', text: '机器人可以正常回复。' })
   expect(runtime.store.decisions.byThread(threadKey).at(-1)?.reason).toEqual([{ code: 'answeredByOrchestrator', triggerId: query.id }])
-  await expect(runTool(runtime.masterId, 'orchestrator_trigger_requeue', { trigger_id: query.id })).rejects.toThrow('answered or clarified')
+  await expect(runTool(routerId, 'orchestrator_trigger_requeue', { trigger_id: query.id })).rejects.toThrow('answered or clarified')
   await expect(route({ kind: 'accept', trigger_id: query.id, title: '测试连接', worktree_name: 'check-chat', acknowledgement: '我来检查。' }))
     .rejects.toThrow('answered or clarified')
   expect(runtime.store.tickets.list()).toEqual([])
@@ -380,7 +381,7 @@ it('refuses to attach an unlisted inferred Feishu follow-up even when an active 
   const { ticket } = await acceptedTicket()
   const guest = feishu('46', '顺手也改一下', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' })
   await receive(guest)
-  const routed = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'attach', trigger_id: guest.id, ticket_id: ticket.id }] }) as { results: { refused?: string }[] }
+  const routed = await runTool(routerId, 'orchestrator_route', { decisions: [{ kind: 'attach', trigger_id: guest.id, ticket_id: ticket.id }] }) as { results: { refused?: string }[] }
   expect(routed.results[0]?.refused).toContain('explicit requests')
   expect(runtime.store.tickets.get(ticket.id)?.inputs).toEqual([])
 })
@@ -395,7 +396,7 @@ it('keeps Feishu thread messages with the Orchestrator instead of fanning them o
   expect(relays(sessionId)).toEqual([])
   expect(runtime.store.triggers.disposition(followup.id)?.fanout).toEqual([])
   expect(runtime.store.tickets.get(ticket.id)!.inputs).toEqual([])
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', trigger_id: followup.id, conversation_first: true })
+  expect(relays(routerId).at(-1)).toMatchObject({ kind: 'candidate', trigger_id: followup.id, conversation_first: true })
 })
 
 it('keeps the Feishu conversation policy scoped to that source even when another Trigger carries its extension fields', async () => {
@@ -406,7 +407,7 @@ it('keeps the Feishu conversation policy scoped to that source even when another
   expect(runtime.store.triggers.disposition(message.id)?.fanout).toEqual([ticket.id])
   expect(relays(sessionId)).toEqual([expect.objectContaining({ trigger_id: message.id })])
   expect(runtime.store.replyStatus(key('received', message.id))).toBeUndefined()
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: message.id, purpose: 'clarify', text: 'Which part?' }))
+  await expect(runTool(routerId, 'orchestrator_reply', { trigger_id: message.id, purpose: 'clarify', text: 'Which part?' }))
     .rejects.toThrow('explicit human Feishu request')
 })
 
@@ -415,24 +416,24 @@ it('assesses a proactive observation in the orchestrator Session and creates the
   await observe('observe')
   const trigger = feishu('3', '这个文案好奇怪，改成“浏览网页”吧', { mentions: [] })
   await receive(trigger)
-  const candidate = relays(runtime.masterId).at(-1)!
+  const candidate = relays(routerId).at(-1)!
   expect(candidate).toMatchObject({ kind: 'candidate', strength: 'inferred', mode: 'observe', next_action: expect.stringContaining('orchestrator_eval') })
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_3', chat_id: CHAT }] })
-  const details = await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
+  const details = await runTool(routerId, 'orchestrator_eval', { trigger_id: trigger.id })
   // The rules are in the main Session's Policy section; the context names the Policy version it was built from.
   expect(details).not.toHaveProperty('rules')
   expect(details).toMatchObject({ trigger_id: trigger.id, strength: 'inferred', policy_version: policyVersion(runtime.store.settings()), thread: expect.objectContaining({ complete: true, loaded_messages: 0 }) })
   const decision = (id: string) => ({ trigger_id: id, decision: 'accept', title: '文案修订', worktree_name: 'copy-fix', scope: '改副标题', reason: 'explicit copy change', intent_evidence: 'quoted', acknowledgement: '收到，把副标题改成“浏览网页”。',
     rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'copy change' }, { rule_id: 'visual', matched: false, reason: 'not visual' }],
     direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'the message names the replacement' } })
-  expect(await runTool(runtime.masterId, 'orchestrator_eval_decide', decision(trigger.id))).toMatchObject({ decision: 'ignore', reason: expect.stringContaining('Observe mode') })
+  expect(await runTool(routerId, 'orchestrator_eval_decide', decision(trigger.id))).toMatchObject({ decision: 'ignore', reason: expect.stringContaining('Observe mode') })
   expect(runtime.store.tickets.list()).toEqual([])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_3`)[0]!.audit).toMatchObject({ would_accept: true, proposal: { title: '文案修订' } })
   await observe('auto')
   const again = feishu('5', '把副标题改成“浏览网页”', { mentions: [] })
   await receive(again)
-  await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: again.id })
-  const accepted = await runTool(runtime.masterId, 'orchestrator_eval_decide', decision(again.id))
+  await runTool(routerId, 'orchestrator_eval', { trigger_id: again.id })
+  const accepted = await runTool(routerId, 'orchestrator_eval_decide', decision(again.id))
   expect(accepted).toMatchObject({ decision: 'accept', ticket: { ticket_id: expect.any(String) } })
   const ticket = runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
   expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ via: 'admission', rules: ['copy'], observation: { mode: 'auto' } }) })
@@ -447,8 +448,8 @@ it('accepts silently under a rule that says so, gives the worker the rule proced
   const trigger = feishu('20', '切换主题后刷新，图标颜色不对', { mentions: [] })
   await receive(trigger)
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_20', chat_id: CHAT }] })
-  await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
-  const accepted = await runTool(runtime.masterId, 'orchestrator_eval_decide', { trigger_id: trigger.id, decision: 'accept', title: '主题图标颜色', worktree_name: 'theme-icon-color', scope: 'bug', reason: 'reported defect', intent_evidence: 'quoted',
+  await runTool(routerId, 'orchestrator_eval', { trigger_id: trigger.id })
+  const accepted = await runTool(routerId, 'orchestrator_eval_decide', { trigger_id: trigger.id, decision: 'accept', title: '主题图标颜色', worktree_name: 'theme-icon-color', scope: 'bug', reason: 'reported defect', intent_evidence: 'quoted',
     rule_assessments: [{ rule_id: 'copy', matched: false, reason: 'no' }, { rule_id: 'visual', matched: false, reason: 'no' }, { rule_id: 'silent-bugfix', matched: true, reason: 'bug report' }],
     direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: 'expected colour is the light palette' } })
   const ticket = runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
@@ -456,25 +457,25 @@ it('accepts silently under a rule that says so, gives the worker the rule proced
   await runtime.idle()
   expect(sections.get(`worker-${ticket.id}`)!.text({})).toContain(mandateInstructions({ strength: 'inferred' }))
   expect(await runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` })).toMatchObject({ text: expect.stringContaining('沉默地复现和修复 (silent-bugfix): Reproduce minimally first; accept silently.') })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
+  await expect(runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
   await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'blocked', summary: 'needs a decision' })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
+  await expect(runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
   // Nothing left for a human: the ticket closes instead of waiting, and the rule's closing sentence can still be delivered.
   await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'dropped', summary: 'too complex; recorded in #123' })
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ by: 'executor', outcome: 'dropped' }) })
-  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '看到这个问题我试了一下，能复现，修复需要较大改动，已记在 #123。' })).toEqual({ status: 'sent' })
+  expect(await runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '看到这个问题我试了一下，能复现，修复需要较大改动，已记在 #123。' })).toEqual({ status: 'sent' })
 })
 
 it('records worker reports, binds the task PR, ends the ticket on ready without a PR, and relays attention', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   deliveries.mockClear()
   expect(await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'started' })).toMatchObject({ notification: 'internal_only' })
-  expect(relays(runtime.masterId)).toEqual([])
+  expect(relays(routerId)).toEqual([])
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'need a decision', human_action: 'Desktop too?' })
   expect(runtime.store.tickets.get(ticket.id)!.attention).toMatchObject({ question: 'Desktop too?' })
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_attention', ticket: { ticket_id: ticket.id, attention: { question: 'Desktop too?' } } })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'other', text: 'x' })).rejects.toThrow('current attention question')
-  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })).toEqual({ status: 'sent' })
+  expect(relays(routerId).at(-1)).toMatchObject({ kind: 'worker_attention', ticket: { ticket_id: ticket.id, attention: { question: 'Desktop too?' } } })
+  await expect(runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'other', text: 'x' })).rejects.toThrow('current attention question')
+  expect(await runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })).toEqual({ status: 'sent' })
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42, human_action: null })
   const bound = runtime.store.tickets.get(ticket.id)!
   expect(pullOf(bound)).toBe(42)
@@ -482,8 +483,8 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   expect(runtime.store.threads.get('github:42')?.subscriptions).toEqual([ticket.id])
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'reviewed' })
   expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined()
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'ready' })
-  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '已提交 PR #42，待 review。' })).toEqual({ status: 'sent' })
+  expect(relays(routerId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'ready' })
+  expect(await runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '已提交 PR #42，待 review。' })).toEqual({ status: 'sent' })
   const mergedAt = new Date().toISOString()
   const merged = { number: 42, state: 'closed', merged: true, merged_at: mergedAt, html_url: 'https://github.com/acme/widgets/pull/42',
     user: { login: 'agent-bot' }, head: { sha: 'abc', ref: 'agent/x', repo: { full_name: 'acme/widgets' } } }
@@ -552,7 +553,7 @@ it('stops a ticket on a person\'s instruction, and leaves ended-ticket follow-up
   expect(stillEnded.assignments).toHaveLength(1)
   expect(stillEnded.inputs).toEqual([])
   expect(runtime.store.triggers.disposition(followup.id)?.fanout).toEqual([])
-  expect(relays(runtime.masterId).some(item => item.trigger_id === followup.id)).toBe(true)
+  expect(relays(routerId).some(item => item.trigger_id === followup.id)).toBe(true)
 })
 
 it('tells live workers about policy changes instead of revoking them and restarts in-flight assessments', async () => {
@@ -578,7 +579,7 @@ it('tells live workers about policy changes instead of revoking them and restart
   expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined()
   expect(relays(sessionId)).toEqual([{ text: expect.stringContaining('may no longer start work') }])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_8`)[0]).toMatchObject({ kind: 'unavailable', reason: [{ code: 'policyChanged' }] })
-  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate' && item.trigger_id === pending.id)).toHaveLength(1)
+  expect(relays(routerId).filter(item => item.kind === 'candidate' && item.trigger_id === pending.id)).toHaveLength(1)
 })
 
 it('attaches an event to an existing open task through orchestrator_route', async () => {
@@ -598,9 +599,9 @@ it('acknowledges a follow-up from the worker once and rejects events outside the
   await receive(followup)
   expect(runtime.store.tickets.get(ticket.id)!.inputs).toEqual([])
   await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: followup.id })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: followup.id, purpose: 'clarify', text: '范围还要说明吗？' }))
+  await expect(runTool(routerId, 'orchestrator_reply', { trigger_id: followup.id, purpose: 'clarify', text: '范围还要说明吗？' }))
     .rejects.toThrow('not been handed to a worker')
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { trigger_id: followup.id, purpose: 'answer', text: '收到，我已经处理。' }))
+  await expect(runTool(routerId, 'orchestrator_reply', { trigger_id: followup.id, purpose: 'answer', text: '收到，我已经处理。' }))
     .rejects.toThrow('No worker answer is ready')
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '收到，也处理这个。' })).toMatchObject({ acknowledgement: 'sent', reused: false })
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '不同措辞' })).toMatchObject({ reused: true })
@@ -616,7 +617,7 @@ it('treats GitHub comments through the same gate: mentions by members are explic
   expect(runtime.store.decisions.byThread('github:7')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [expect.objectContaining({ code: 'not_a_member' })] })])
   const mention = commentTrigger({ id: 2, body: '@agent-bot please fix', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-2', created_at: '2026-09-09T00:01:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
   await receive(mention)
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
+  expect(relays(routerId).at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
   const result = await route({ kind: 'accept', trigger_id: mention.id, title: 'Fix PR 7', worktree_name: 'fix-pr', acknowledgement: 'On it: fixing the review finding.' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   expect(ticket.channels).toEqual([expect.objectContaining({ source: 'github', address: expect.objectContaining({ number: '7' }) })])
@@ -638,7 +639,7 @@ it('relays an allowed sender\'s mention in a new Issue as an explicit candidate 
   runtime.store.set('github-since', '2026-09-08T23:59:00.000Z')
   await pollRound(runtime.context(githubKind))
   await runtime.idle()
-  const candidate = relays(runtime.masterId).at(-1)
+  const candidate = relays(routerId).at(-1)
   expect(candidate).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: key('github-issue', '12'), thread: 'github:12' })
 })
 
@@ -660,7 +661,7 @@ it('ignores an allowed sender\'s new Issue that does not mention the agent, and 
   expect(runtime.store.decisions.byThread('github:12')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'no_mention', triggerId: quiet }] })])
   const stranger = await poll(13, '@agent-bot please fix the login', 'mallory')
   expect(runtime.store.decisions.byThread('github:13')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'not_a_member', triggerId: stranger }] })])
-  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toEqual([])
+  expect(relays(routerId).filter(item => item.kind === 'candidate')).toEqual([])
 })
 
 it('keeps Issue Triggers stored before Issues arrived through notifications readable on their Thread', async () => {
@@ -670,7 +671,7 @@ it('keeps Issue Triggers stored before Issues arrived through notifications read
   runtime.store.triggers.save(stored)
   runtime.store.threads.save({ key: 'github:5', ref: { source: 'github', id: '5' }, createdAt: stored.at, subscriptions: [], correlated: [],
     pending: [], meta: {} })
-  const read = await runTool(runtime.masterId, 'orchestrator_read', { resource: `trigger/${stored.id}` })
+  const read = await runTool(routerId, 'orchestrator_read', { resource: `trigger/${stored.id}` })
   expect(read).toMatchObject({ trigger_id: stored.id, source: 'github-issue', text: 'Bug\n\ndetails' })
   const thread = (await api('GET', 'threads/github:5')).body
   expect(thread).toMatchObject({ timeline: [expect.objectContaining({ id: stored.id, source: 'github-issue' })] })
@@ -717,7 +718,7 @@ it('projects read models for the management page and removes thread subscription
     revision: expect.any(Number), value: expect.objectContaining({ enabled: true }) })]), blocks: { policy: { revision: expect.any(Number) } } })
   expect((await api('POST', `threads/${encodeURIComponent(threadKeyValue)}/unsubscribe`)).body).toMatchObject({ removed: true })
   expect(threadList(viewsOf(runtime), 'subscribed', 0, 20).items).toEqual([])
-  expect(agents.get(runtime.masterId)!.inject).toHaveBeenCalled()
+  expect(agents.get(routerId)!.inject).toHaveBeenCalled()
 })
 
 it('lets an Executor drop only its own ticket from a thread it finds unrelated, but not the thread it started on or its pull request\'s', async () => {
@@ -726,7 +727,7 @@ it('lets an Executor drop only its own ticket from a thread it finds unrelated, 
   // An attached thread that turns out to be about something else, which another ticket also follows.
   const attached = { source: 'feishu', id: 'oc_side:om_side' }
   subscribe(ticket.id, attached); subscribe(other.ticket.id, attached)
-  const inject = agents.get(runtime.masterId)!.inject
+  const inject = agents.get(routerId)!.inject
   vi.mocked(inject).mockClear()
   expect(await runTool(sessionId, 'orchestrator_thread_unrelated', { thread: 'feishu:oc_side:om_side', reason: 'It discusses the login page, not this regression.' })).toEqual({ removed: true, thread: 'feishu:oc_side:om_side' })
   expect(runtime.store.threads.get('feishu:oc_side:om_side')!.subscriptions).toEqual([other.ticket.id])
@@ -885,7 +886,7 @@ it('links Channels and Threads for people, finds tickets by a bare PR number, an
   expect(threadList(viewsOf(runtime), 'subscribed', 0, 10).items).toEqual([])
   expect(threadList(viewsOf(runtime), 'all', 0, 10).items.map(thread => thread.key)).toContain(home)
   await receive(feishu('9', '别的群的消息', { chat_id: 'oc_elsewhere' }))
-  expect(search(viewsOf(runtime), '别的群', new TextCache(0)).items).toEqual([expect.objectContaining({ filtered: { code: 'chat_not_allowed' }, threadTitle: undefined })])
+  expect(search(viewsOf(runtime), '别的群', new TextCache(0)).items).toEqual([expect.objectContaining({ filtered: { code: 'project_not_bound' }, threadTitle: undefined })])
 })
 
 it('counts every step of the day\'s flow over the same arriving messages and lists the same accepted Decisions', async () => {
@@ -904,7 +905,7 @@ it('queues a requeued trigger visibly and tells the orchestrator', async () => {
   runtime.store.saveSettings({ ...runtime.store.settings(), paused: true })
   expect(runtime.engine.reevaluate(stranger.id)).toBe(true)
   expect(threadDetail(viewsOf(runtime), 'github:8', undefined, 50)!.timeline[0]!.disposition).toMatchObject({ queued: true })
-  await vi.waitFor(() => expect(agents.get(runtime.masterId)!.inject).toHaveBeenCalled())
+  await vi.waitFor(() => expect(agents.get(routerId)!.inject).toHaveBeenCalled())
 })
 
 it('asks a question where the human message that raised it was written, not in the ticket\'s original conversation', async () => {
@@ -916,11 +917,11 @@ it('asks a question where the human message that raised it was written, not in t
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'x', human_action: 'Keep it?', question_for_trigger_id: 'unknown' })).rejects.toThrow('the person\'s message that raised it')
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'no stop reason is recorded', human_action: 'Keep the PR and record the reason in a follow-up?', question_for_trigger_id: review.id })
   const queued = vi.spyOn(runtime.outbox, 'send')
-  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Keep the PR and record the reason in a follow-up?', text: 'Keep the PR and record the reason in a follow-up?' })
+  await runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Keep the PR and record the reason in a follow-up?', text: 'Keep the PR and record the reason in a follow-up?' })
   expect(queued.mock.calls.at(-1)![0].channel).toEqual(review.channel)
   // A question about the ticket as a whole still goes to where the ticket started.
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'y', human_action: 'Desktop too?' })
-  await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })
+  await runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })
   expect(queued.mock.calls.at(-1)![0].channel).toEqual(trigger.channel)
 })
 
@@ -939,12 +940,12 @@ it('keeps pages of Source reads, prompt previews and Feishu message links in mem
   await receive(message)
   const link = 'https://applink.feishu.cn/client/message/link/open?token=t30'
   vi.mocked(Commands.prototype.lark).mockResolvedValue({ messages: [{ message_id: 'om_30', chat_id: CHAT, message_app_link: link }] })
-  expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: `trigger/${message.id}` })).toMatchObject({ source_url: link })
+  expect(await runTool(routerId, 'orchestrator_read', { resource: `trigger/${message.id}` })).toMatchObject({ source_url: link })
   // An AppLink is found by the links read since dsh-superagent started.
   expect((await api('GET', `search?q=${encodeURIComponent(link)}`)).body).toMatchObject({ items: [expect.objectContaining({ id: message.id })] })
   const config = runtime.prompts.current().config
-  const { previews } = await runTool(runtime.masterId, 'orchestrator_prompts_save', { config, preview: true }) as { previews: { read: string }[] }
-  expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: previews[0]!.read, offset: 4000 })).toMatchObject({ offset: 4000 })
+  const { previews } = await runTool(routerId, 'orchestrator_prompts_save', { config, preview: true }) as { previews: { read: string }[] }
+  expect(await runTool(routerId, 'orchestrator_read', { resource: previews[0]!.read, offset: 4000 })).toMatchObject({ offset: 4000 })
   expect(runtime.store.keys('').filter(name => /-read:|source-link:|prompt-preview\//.test(name))).toEqual([])
 })
 
@@ -1105,8 +1106,10 @@ it('pauses and resumes processing as its own action, a setting outside every blo
   await expect(runtime.settings.save('executor', { ...draft, paused: false }, revision, 'panel')).rejects.toThrow('paused')
   await runtime.settings.save('executor', { ...draft, maxWorkers: 5 }, revision, 'panel')
   expect(runtime.store.settings()).toMatchObject({ paused: true, executor: { maxWorkers: 5 } })
-  // The orchestrator pauses and resumes the same way, through the settings tool's pause block.
-  await runTool(runtime.masterId, 'orchestrator_settings_save', { block: 'pause', value: { paused: false }, revision: 0 })
+  // A project router cannot resume all other projects.
+  await expect(runTool(routerId, 'orchestrator_settings_save', { block: 'pause', value: { paused: false }, revision: 0 })).rejects.toThrow()
+  expect(runtime.store.settings().paused).toBe(true)
+  await runtime.settings.pause(false, 'panel')
   expect(runtime.store.settings().paused).toBe(false)
 })
 
@@ -1180,7 +1183,7 @@ it('tells both roles the execution environment through a generated prompt sectio
   expect(preview.orchestrator).toContain(`${section.text}\n\n## Policy`)
   const { ticket, sessionId } = await acceptedTicket()
   expect(sections.get(sessionId)!.text({})).toContain(`- DSH_SUPERAGENT_DIR = ${JSON.stringify(ticket.execution!.directory)}`)
-  expect(sections.get(runtime.masterId)!.text({})).not.toContain('DSH_SUPERAGENT_DIR')
+  expect(sections.get(routerId)!.text({})).not.toContain('DSH_SUPERAGENT_DIR')
   const next = await restart({}, { feishu: null })
   await next.ready
   expect(Object.keys(next.prompts.preview(next.prompts.current().config).skills)).not.toContain('feishu')
@@ -1213,7 +1216,7 @@ it('passes team text with template braces to every Session literally, without re
   const current = runtime.prompts.current()
   runtime.prompts.save({ ...current.config, delivery }, current.revision, 'panel')
   const { sessionId } = await acceptedTicket()
-  for (const id of [runtime.masterId, sessionId]) {
+  for (const id of [routerId, sessionId]) {
     const section = sections.get(id)!
     const text = renderPrompt({ sections: [{ name: section.name, text: section.text({}), interpolate: section.interpolate }], contexts: [], tools: [], variables: {} })
     expect(text).toContain(delivery)
@@ -1391,7 +1394,7 @@ it('resumes several ended tickets on one thread from one message without the lau
   expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.assignments.at(-1)!.id))
     .toEqual([first.ticket.assignments[0]!.id, second.ticket.assignments[0]!.id])
   expect(deliveries.mock.calls.filter(([call]) => call.sessionId === first.sessionId || call.sessionId === second.sessionId)).toEqual([])
-  expect(relays(runtime.masterId).find(item => item.trigger_id === query.id)).toMatchObject({ kind: 'candidate', trigger_id: query.id, conversation_first: true })
+  expect(relays(routerId).find(item => item.trigger_id === query.id)).toMatchObject({ kind: 'candidate', trigger_id: query.id, conversation_first: true })
 })
 
 it('attaches a message to an ended ticket and so resumes it', async () => {
@@ -1455,7 +1458,7 @@ it('reports a dropped acknowledgement as dropped, with its Ticket on the Source 
   await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: followup.id })
   vi.mocked(Commands.prototype.lark).mockRejectedValue(new CliError('the message was withdrawn', 230011))
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '收到，也处理这个。' })).toMatchObject({ acknowledgement: 'dropped' })
-  expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: `trigger/${followup.id}` })).toMatchObject({ acknowledgement: 'dropped' })
+  expect(await runTool(routerId, 'orchestrator_read', { resource: `trigger/${followup.id}` })).toMatchObject({ acknowledgement: 'dropped' })
   const dropped = ((await api('GET', 'sources')).body as unknown as { dropped: unknown[] }[]).flatMap(source => source.dropped)
   expect(dropped).toMatchObject([{ id: key('ack', followup.id), ticket: { id: ticket.id, title: ticket.title } }])
   expect(overviewOf(runtime).flow.dropped).toBe(1)
@@ -1503,14 +1506,14 @@ it('records a report, the PR it binds and its relay together, or none of them', 
   expect(after).not.toHaveProperty('attention')
   expect(after.assignments).toEqual(before.assignments)
   await runtime.idle()
-  expect(relays(runtime.masterId)).toEqual([])
+  expect(relays(routerId)).toEqual([])
 })
 
 it('tells the main Session of each requeue of the same Trigger', async () => {
   const stranger = commentTrigger({ id: 4, body: 'still wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/8#issuecomment-4', created_at: '2026-09-09T00:00:00Z' },
     { number: 8, isPr: true, url: 'https://github.com/acme/widgets/pull/8' }, 'conversation', 'agent-bot')
   await receive(stranger)
-  const requeued = () => agents.get(runtime.masterId)!.inject.mock.calls.filter(([message]) => JSON.stringify(message).includes('trigger_requeued')).length
+  const requeued = () => agents.get(routerId)!.inject.mock.calls.filter(([message]) => JSON.stringify(message).includes('trigger_requeued')).length
   expect(runtime.engine.reevaluate(stranger.id)).toBe(true)
   await runtime.idle()
   expect(runtime.engine.reevaluate(stranger.id)).toBe(true)
@@ -1522,7 +1525,7 @@ it('keeps replies and acknowledgements to an IM conversation within the IM limit
   const { ticket, trigger, sessionId } = await acceptedTicket()
   const long = Array.from({ length: IM_WORDS + 1 }, () => 'word').join(' ')
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'reviewed' })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: long })).rejects.toThrow(`maximum is ${IM_WORDS}`)
+  await expect(runTool(routerId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: long })).rejects.toThrow(`maximum is ${IM_WORDS}`)
   const follow = feishu('3', '@bot 还有一个问题', { root_id: trigger.meta.messageId as string, sender_id: MEMBER })
   await receive(follow)
   await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: follow.id })
@@ -1628,13 +1631,13 @@ it('keeps the report of a blocked, failed or ready worker whose turn ends, and r
   for (const state of ['blocked', 'failed', 'ready'] as const) {
     const { ticket, sessionId } = await acceptedTicket(feishu(String(20 + ['blocked', 'failed', 'ready'].indexOf(state)), `@bot 修 ${state}`, { root_id: undefined }))
     await runTool(sessionId, 'orchestrator_report', { state, summary: `${state} report` })
-    const relayed = relays(runtime.masterId).length
+    const relayed = relays(routerId).length
     const agent = agents.get(sessionId)! as { status: string }
     agent.status = 'idle'
     ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent, status: 'idle' } as never)
     await runtime.idle()
     expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state, summary: `${state} report` })
-    expect(relays(runtime.masterId)).toHaveLength(relayed)
+    expect(relays(routerId)).toHaveLength(relayed)
   }
 })
 
@@ -1644,7 +1647,7 @@ it('relays the status-request hint when a worker\'s turn ends with no text and n
   agent.status = 'idle'
   ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent, status: 'idle' } as never)
   await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'waiting' }))
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'waiting',
+  expect(relays(routerId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'waiting',
     summary: expect.stringContaining('orchestrator_ticket_request_status') })
 })
 
@@ -1652,71 +1655,7 @@ it('fails a ticket at once on a worker error that is not passing, and relays it'
   const { ticket, sessionId } = await acceptedTicket()
   ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/error', { agent: agents.get(sessionId), turn: 1, step: 1, error: new Error('Invalid tool schema') } as never)
   await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Invalid tool schema') }))
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
-})
-
-it('refuses the main Session a bash command that runs sleep and a long job wait, as reports arrive by themselves, and no worker', async () => {
-  const bash = (command: string) => ({ name: 'bash', arguments: { command, description: 'x' } })
-  const main = guards.get(runtime.masterId)!
-  for (const command of ['sleep 60; echo done', 'cd x && sleep 5', 'gh pr checks 7 || sleep 30', 'echo a\nsleep 90', 'while true; do sleep 30; done',
-    '(sleep 5)', '/bin/sleep 240', 'while sleep 30; do gh pr checks 7; done', 'if sleep 5; then gh pr view 7; fi', '{ sleep 60; }', '! sleep 5',
-    'nohup sleep 60', 'exec sleep 60', 'time sleep 60', 'until sleep 1; do :; done', 'command sleep 5', 'env sleep 5'])
-    expect(main(bash(command)), command).toMatch(/^Reports, follow_up notices, new candidates and a background job's end/)
-  // A command that names sleep as data, not at a command position, runs.
-  for (const command of ['gh api repos/acme/widgets/pulls', 'echo "sleep"', 'grep sleep file', 'sleeper --help', 'command -v sleep'])
-    expect(main(bash(command)), command).toBeUndefined()
-  // A command that asks to hold the step longer than 30 seconds, however it waits, under any preset.
-  const timed = (command: string, args: { timeoutMs?: number; run_in_background?: boolean } = {}) =>
-    ({ name: 'bash', arguments: { command, description: 'x', ...args } })
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000 }))).toMatch(/^Reports/)
-  expect(main(timed("python3 -c 'import time;time.sleep(240)'", { timeoutMs: 600_000 }))).toMatch(/^Reports/)
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 20_000 }))).toBeUndefined()
-  // Under the router preset, the shell moves a command without a timeout to a background job after 5 seconds, and a job
-  // wait without one ends after 5 seconds too; a longer job wait waits for nothing that arrives that way.
-  expect(main(timed('gh pr checks 7 --watch'))).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 30_000 } })).toMatch(/^Reports/)
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 5_000 } })).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j' } })).toBeUndefined()
-  // A main Session created before runs under standard, whose shell waits 60 seconds by default and whose job waits last 30:
-  // a command without a timeout runs in the background or names one, and a job wait names one.
-  ;(agents.get(runtime.masterId) as unknown as { session: { header: { agentPreset: string } } }).session.header = { agentPreset: 'standard' }
-  expect(main(timed('gh pr checks 7 --watch'))).toMatch(/^This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000/)
-  expect(main(timed('gh pr checks 7 --watch', { run_in_background: true }))).toBeUndefined()
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 20_000 }))).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toMatch(/^Reports/)
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 5_000 } })).toBeUndefined()
-  // A worker waits for its own work as it needs.
-  const { sessionId } = await acceptedTicket()
-  expect(guards.get(sessionId)!(bash('sleep 60'))).toBeUndefined()
-  // The main Session's role says so.
-  expect(masterPrompt).toContain('Worker 报告、`follow_up` 通知、新候选以及后台任务结束通知（连同任务输出）都会自动以消息形式送达')
-})
-
-it('reads the main Session\'s preset from a registry with or without presetForSession, and takes standard\'s caps when it cannot', async () => {
-  const watch = { name: 'bash', arguments: { command: 'gh pr checks 7 --watch', description: 'x' } }
-  const route = { name: 'orchestrator_route', arguments: { decisions: [] } }
-  const guard = async (registry: Record<string, unknown>, projections?: Record<string, unknown>) => {
-    services.agentPresets = registry
-    if (projections) services.sessionProjections = projections; else delete services.sessionProjections
-    await (await restart()).ready
-    return guards.get(runtime.masterId)!
-  }
-  // A released DSH's registry has no presetForSession: the projection says standard, so standard's caps apply, and the
-  // other tools run.
-  let main = await guard({ select: vi.fn() }, { stateOf: vi.fn((_session: unknown, key: string) => key === 'agentPreset' ? 'standard' : undefined) })
-  expect(main(route)).toBeUndefined()
-  expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
-  // Without the projection either, the preset it was created with counts: the router preset.
-  main = await guard({ select: vi.fn() })
-  expect([main(route), main(watch)]).toEqual([undefined, undefined])
-  // The registry says standard though the Session was created with the router preset: standard's caps apply.
-  main = await guard({ select: vi.fn(), presetForSession: () => 'standard' })
-  expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
-  // A registry that fails is read as standard, the safer caps, and the guard does not throw.
-  main = await guard({ select: vi.fn(), presetForSession: () => { throw new Error('no projection') } })
-  expect(main(route)).toBeUndefined()
-  expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
+  expect(relays(routerId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
 
 it('refuses an ended ticket\'s worker its tools, and restricts the main Session to the tools it may use', async () => {
@@ -1724,7 +1663,7 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
-  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
+  expect(restricts.get(routerId)).toEqual([{ allow: ['skill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
@@ -1840,7 +1779,7 @@ it('creates an Executor Session under the bundle\'s worker preset, and the main 
   const { sessionId } = await acceptedTicket()
   const created = controller.create.mock.calls.map(([options]) => options as { sessionId: string; agentPreset: string })
   expect(created.find(options => options.sessionId === sessionId)).toMatchObject({ agentPreset: 'dsh-superagent-worker' })
-  expect(created.find(options => options.sessionId === runtime.masterId)).toMatchObject({ agentPreset: 'dsh-superagent-router' })
+  expect(created.find(options => options.sessionId === routerId)).toMatchObject({ agentPreset: 'dsh-superagent-router' })
 })
 
 it('selects its own preset again for a main Session or worker a person switched before its first turn, and not after it', async () => {
@@ -1855,11 +1794,11 @@ it('selects its own preset again for a main Session or worker a person switched 
   await (await restart()).ready
   const emit = (sessionId: string, preset: string) => (runtime as unknown as { ctx: Context }).ctx.emit('agent-preset/selected', sessionId, preset)
   // A person opened the blank main Session in DSH's Web UI, which selected the default preset for it.
-  emit(runtime.masterId, 'standard')
-  await vi.waitFor(() => expect(presets.select).toHaveBeenCalledWith(agents.get(runtime.masterId), 'dsh-superagent-router'))
+  emit(routerId, 'standard')
+  await vi.waitFor(() => expect(presets.select).toHaveBeenCalledWith(agents.get(routerId), 'dsh-superagent-router'))
   // Its own preset, which that selection announces the same way, is left alone.
   presets.select.mockClear()
-  emit(runtime.masterId, 'dsh-superagent-router'); await Promise.resolve()
+  emit(routerId, 'dsh-superagent-router'); await Promise.resolve()
   expect(presets.select).not.toHaveBeenCalled()
   emit(sessionId, 'standard')
   await vi.waitFor(() => expect(presets.select).toHaveBeenCalledWith(agents.get(sessionId), 'dsh-superagent-worker'))
@@ -1868,8 +1807,8 @@ it('selects its own preset again for a main Session or worker a person switched 
   emit('someone-else', 'standard'); emit('worker-nothing', 'standard'); await Promise.resolve()
   expect(presets.select).not.toHaveBeenCalled()
   // After its first turn the registry refuses any selection, which changes nothing and is not an error.
-  started.add(runtime.masterId)
-  emit(runtime.masterId, 'standard')
+  started.add(routerId)
+  emit(routerId, 'standard')
   await vi.waitFor(() => expect(presets.select).toHaveBeenCalledTimes(1))
   await expect(presets.select.mock.results[0]!.value).rejects.toMatchObject({ code: 'agent-preset/locked' })
 })
@@ -1930,17 +1869,17 @@ it('ends the main Session\'s prompt with its Policy section, each rule on one li
   const rules = settings.policy.rules.map(rule => rule.id === 'copy'
     ? { ...rule, name: 'Copy\nfixes', instruction: 'Fix typos.\n- Keep the tone.\n\n## Not a heading' } : rule)
   await runtime.settings.save('policy', { ...settings.policy, rules }, runtime.store.blockRevision('policy'), 'panel')
-  const prompt = (sections.get(runtime.masterId)!.text as (context: object) => string)({})
+  const prompt = (sections.get(routerId)!.text as (context: object) => string)({})
   const policy = prompt.slice(prompt.indexOf('## Policy'))
   // Nothing follows the section, whose lines after its head are exactly the enabled rules.
   expect(policy.trimEnd().split('\n').slice(2)).toEqual(runtime.store.settings().policy.rules.filter(rule => rule.enabled)
     .map(rule => rule.id === 'copy' ? '- Copy fixes (copy): Fix typos. - Keep the tone. ## Not a heading' : `- ${rule.name} (${rule.id}): ${rule.instruction}`))
   expect(prompt.indexOf('## Policy')).toBeGreaterThan(prompt.indexOf('Execution environment'))
-  expect((tools.get(runtime.masterId)!.get('orchestrator_eval') as unknown as { description: string }).description).not.toMatch(/rules/)
+  expect((tools.get(routerId)!.get('orchestrator_eval') as unknown as { description: string }).description).not.toMatch(/rules/)
 })
 
 it('keeps the Policy the main Session judges by in its prompt, after admission and the rest, as the latest save left it', async () => {
-  const prompt = () => (sections.get(runtime.masterId)!.text as (context: object) => string)({})
+  const prompt = () => (sections.get(routerId)!.text as (context: object) => string)({})
   const policy = () => { const text = prompt(), at = text.indexOf('## Policy'); return text.slice(at, text.indexOf('\n\n', at)) }
   const settings = runtime.store.settings()
   const line = (rule: { id: string; name: string; instruction: string }) => `- ${rule.name} (${rule.id}): ${rule.instruction}`

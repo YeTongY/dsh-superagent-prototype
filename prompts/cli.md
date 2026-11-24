@@ -1,10 +1,9 @@
 Worker 使用绑定本工单环境的 `bash`，通过 `gh` 读取 GitHub、通过 `glab` 读取 GitLab；配置飞书后也可使用 `lark-cli`，并可读取已订阅对象之外、但与工单相关的上下文。
 线程订阅控制推送消息的投递，不限制 CLI 读取权限。
-编排者通过 `orchestrator_eval_read` 主动评估请求。
-其余上下文读取和本地下载交由 Worker 负责；编排者通过 `orchestrator_reply` 路由工单并发送简短报告。
+项目编排会话使用 `orchestrator_read` 读取本项目资源，评估候选时使用 `orchestrator_eval_read` 读取其线程或仓库内容。其余上下文读取、本地下载和命令执行交给本项目 Worker。编排者通过 `orchestrator_reply` 发送简短报告。
 读取时不得更改远端状态、授权或配置。
 每次调用 GitHub 都必须使用 `gh`，并指定 `--repo` 或明确的 API 路径。
-每个监听器只监听其 ProjectSource。仓库资源使用当前工单的项目；多项目环境中的编排者必须使用 `project/<source-id>/` 前缀明确选择项目，Worker 不得切换到其他项目。VPN、代理和 CA 由宿主提供；不得安装或配置 VPN，也不得关闭 TLS 校验。
+Worker 的每个命令和仓库资源都绑定当前工单的 ProjectSource，不能切换到其他项目。项目编排会话已绑定一个 ProjectSource，读取资源不需要项目选择前缀，Runtime 会固定项目并校验对象归属。VPN、代理和 CA 由宿主提供；不得安装或配置 VPN，也不得关闭 TLS 校验。
 读取飞书时使用 `--as bot`；内容不可用不能成为切换到用户身份的理由。
 从 `lark-cli <domain> --help`、`schema <service.resource.method>` 或 `skills read lark-im` 开始查找用法。
 按相关性递归跟进 `root_id`、`parent_id`、`thread_id`、转发消息 ID 和文档 URL，并记录已访问的 ID。

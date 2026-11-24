@@ -30,7 +30,9 @@ flowchart TB
 
 `Runtime` 是组合根，不包含领域规则。它的构造函数会锁定状态目录、打开 Store 并构建各组件。如果构建失败，它会关闭 Store 并释放锁。
 
-启动时会注册管理路由并运行 Setup。Setup 完成后，Runtime 会安装 Session 和 Executor hooks，确保主 Session 存在，启动 Policy 同步，恢复中断的 Assignment，并启动 pass 和 effect。`ready` 表示启动完成。
+启动时会注册管理路由并运行 Setup。Setup 完成后，Runtime 会安装 Session 和 Executor hooks，恢复各个已就绪项目的编排会话，启动 Policy 同步，恢复中断的 Assignment，并启动 pass 和 effect。`ready` 表示启动完成。
+
+每个 ProjectSource 的仓库事件和绑定的飞书群消息由同一项目编排会话处理。项目通过稳定标识定位会话，Runtime 共用领域 Engine 和 Store。飞书保留原生群和消息 ID 以回复原线程。工具在服务端校验工单、资源和 Reporter 运行的项目归属。
 
 关闭时会取消当前轮次，等待 pass、effect 和 Agent 结束，恢复进程环境，关闭 Store 并释放锁。Source 插件通过精简的 `SourceHost` 接口将 Runtime 注入为 `orchestrator` 服务。
 
@@ -232,9 +234,9 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 
 ### Session 管理（Sessions）
 
-`Sessions`（`src/app/sessions.ts`）管理两个角色使用的 DeepSeek Harness Session。`ensure` 会使用对应角色的模型创建 Session。`install` 会监听 Agent 事件，并为托管 Session 注册 Prompt、Skill 和工具。
+`Sessions`（`src/app/sessions.ts`）管理编排者、Worker 和 Reporter 的 DeepSeek Harness Session。`ensure` 会使用对应角色的模型创建 Session。`install` 会监听 Agent 事件，并为托管 Session 注册 Prompt、Skill 和工具。
 
-`prompt` 会对每个 request ID 只发送一次。`relay` 和 `notify` 会将主 Session 消息排入队列，再由 `relay` 和 `notice` effect 处理。消息内容定义在 `src/app/notices.ts` 中；`delivery` 用于检查消息是否已送达。
+`prompt` 会对每个目标会话和 request ID 只发送一次。`relay` 和 `notify` 通过原有 effect 队列投递到对应的项目会话。消息内容定义在 `src/app/notices.ts` 中，`delivery` 用于检查消息是否已送达。
 
 每次模型请求都会将 Session 绑定到当前 Prompt revision。Session 用过的 revision 会持久保存：`promptVersion` 标识当前使用的版本，`mayRead` 限制 Worker 可以查看的版本。每个 Agent 的注册信息各自保存在独立 map 中。
 
@@ -344,11 +346,11 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/app/cache.ts` | `TextCache`：将文本缓存在有容量上限的内存中，优先淘汰最近最少使用的内容。 |
 | `src/app/settings.ts` | Settings。 |
 | `src/app/settings-history.ts` | `policyHistory`：为每个已保存的设置 revision 记录相对前一版本的变更。 |
-| `src/app/project-scope.ts` | 项目归属解析，供编排工具、资源视图和候选卡片使用。 |
 | `src/app/prompts.ts` | Prompts、`builtInParts`（团队可覆盖的内置部分）和 `promptParts`（角色 Prompt 各部分的顺序）。 |
 | `src/app/context.ts` | 从 `prompts/` 读取的内置 Prompt 文本，以及 Session 读取的 transcript 条目。 |
 | `src/app/skill-files.ts` | 打包文本：`promptFile` 会将文件中每行一句的内容合并为段落；此处还包含随包发布的 Skill。 |
 | `src/app/sessions.ts` | Sessions。 |
+| `src/app/project-scope.ts` | 项目归属解析，供编排工具、资源视图和候选卡片使用。 |
 | `src/app/delivery.ts` | `AgentDelivery`：确保每个 request ID 对 DeepSeek Harness Agent 只投递一次消息，即使 Session 已恢复也保持此规则。 |
 | `src/app/retry-health.ts` | `RetryHealth`：追踪哪些 Session 正等待模型预算重试，为 `models` 健康状态项提供信息。 |
 | `src/app/role-models.ts` | 解析 Eval 和 Executor 模型，并为新 Session 设置其角色对应的模型。 |
@@ -423,6 +425,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | 测试 | 覆盖范围 |
 | --- | --- |
 | `tests/projects.spec.ts` | 多项目身份、配置、执行环境、并发与跨项目领域授权 |
+| `tests/project-orchestrators.spec.ts` | 两个项目的仓库和飞书路由、项目权限、原线程回复、会话恢复和独立重试 |
 | `tests/project-context.spec.ts` | 旧身份、新项目与 Reporter Trigger 的上下文隔离和路由 |
 | `tests/project-migration.spec.ts` | 停机迁移、回滚、历史策略版本、活动授权和 Eval 恢复 |
 | `tests/reporter.spec.ts` | 本地 Reporter 协议、持久化、隐藏 Oracle、脚本与回放 |
@@ -547,17 +550,11 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 
 `orchestrator_route` 按顺序接收 1–20 个 Decision。每个 accept、attach、stop 或 ignore 都会作为独立的 Engine 命令执行。它也允许直接从卡片中忽略推断候选项。`orchestrator_ticket_note` 会将事实作为上下文发送，不会授予权限。
 
-设置保存可以选择 `policy`、`eval`、`executor`、`pause` 或 `source`；选择 `source` 时还要提供 Source ID。Prompt 保存请求设置 `preview: true` 时，只会组装文本而不会保存。
+项目编排者只可修改所属项目的 Source 设置。全局暂停、策略和 Prompt 设置由运营者在管理面板修改。项目编排者可以通过 `preview: true` 预览项目的 Prompt。
 
-主 Session 还可以使用 DeepSeek Harness 提供的 `skill`、`bash`、`read`、`read_image`、`job_output`、`job_list` 和 `job_kill`。避免读取代码是 Prompt 规则，而不是工具权限限制。
+### 项目编排会话预设
 
-### 预设与等待限制
-
-新建的主 Session 使用 `dsh-superagent-router`（`ROUTER_PRESET`）。Shell 命令和 job 等待会在 5 秒后返回。如果 Web UI 在第一轮开始前选择了其他 preset，`Sessions` 会恢复为该 preset；Worker 则恢复为 `WORKER_PRESET`。
-
-`src/app/sessions.ts` 中的 `noWait` guard 会拒绝主 Session 执行在命令位置调用 `sleep` 的 shell 命令、`timeoutMs` 超过 30 秒的 shell 命令，以及等待超过 5 秒的 `job_output`。Report 和 job 结果会自动送达，因此等待只会延迟候选项到达。
-
-仍在使用 `standard` 的既有主 Session，也需要为前台命令和 job 等待显式设置超时；否则该 preset 默认分别会等待 60 秒和 30 秒。宿主通过 `presetForSession` 判断当前 preset，如果无法读取，则回退到 Session projection 或 header；若这些信息也不可用，则假设使用 `standard`。
+新建项目编排会话使用 `dsh-superagent-router`（`ROUTER_PRESET`），使用 DSH 的 `skill` 和 Runtime 注册的项目工具。资源通过 `orchestrator_read` 或 `orchestrator_eval_read` 读取，具体执行交给 Worker。`Sessions` 会在 Web UI 过早选择其他 preset 时恢复各角色的预设。
 
 ### Executor 工具
 

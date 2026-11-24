@@ -96,7 +96,7 @@ export interface ReporterAutonomousHost {
   promptSession(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer', authorize?: () => void): Promise<void>
   cancelSession(sessionId: string): Promise<void>
   sessionStatus(sessionId: string): 'running' | 'idle' | 'missing'
-  relay(requestId: string, text: string): void
+  relay(requestId: string, text: string, projectId: string): void
   /** 将确认 finding 交给唯一的 Runtime/Engine 入口；不得直接写工单存储。 */
   submitFinding(trigger: Trigger): ReceiveResult
   browser?: { create(sessionId: string, signal: AbortSignal): Promise<ReporterBrowserDriver> }
@@ -235,7 +235,7 @@ export class ReporterAutonomousRuns {
       '状态：investigating（调查中）。这是一条协作消息，不是 Trigger、用户授权、已确认问题或工单；若是未确认疑点，Reporter 会在当前 DSH Session 继续调查同一分支；若是执行依赖，则继续其他可行方向，并在 Worker 结果返回后核验该分支。',
       '',
       text,
-    ].join('\n')))
+    ].join('\n')), record.request.project_source_id)
     return { candidate_id: candidateId, investigation_status: 'investigating', continue_investigation: true }
   }
 
@@ -278,7 +278,7 @@ export class ReporterAutonomousRuns {
       this.host.store.atomic(() => {
         this.update(record, { status: 'completed', summary, full_report: fullReport, error_code: undefined })
         this.host.relay(`reporter-report:${record.view.id}:${digest({ summary, fullReport })}`,
-          reporterMessage(record, '测试报告', `${summary}\n\n${fullReport}`))
+          reporterMessage(record, '测试报告', `${summary}\n\n${fullReport}`), record.request.project_source_id)
       })
     } catch (error) {
       record.view = previousView

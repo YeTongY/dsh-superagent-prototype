@@ -10,7 +10,6 @@ import type { Deployment } from '../deployment.ts'
 import { admissionContext } from '../sources/admission-context.ts'
 import { readRepositoryPath } from '../sources/github-read.ts'
 import { readGitlabRepositoryPath } from '../sources/gitlab-read.ts'
-import { projectForTrigger } from '../project-source.ts'
 import type { TriggerContext } from '../sources/kind.ts'
 import { relatedTickets } from './cards.ts'
 import { textPage } from './context.ts'
@@ -53,6 +52,8 @@ export interface AssessorHost {
   readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide'>
   readonly commands: Commands
   readonly deployment: Deployment
+  /** Resolves a persisted Trigger's trusted ProjectSource, including its original Feishu binding. */
+  projectForTrigger(trigger: Trigger): string | undefined
   /** Durable effect queue through which candidate assessments are delivered. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   settings(): Settings
@@ -60,9 +61,9 @@ export interface AssessorHost {
   paused(): boolean
   /** Thread context reader for `trigger`'s Source, or `undefined` when the Source has none. */
   threadContext(trigger: Trigger): TriggerContext | undefined
-  /** Delivers a candidate card to the main Session once per request ID, resolving after the Session receives it. */
-  deliver(requestId: string, text: string): Promise<void>
-  candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
+  /** Delivers a candidate card to its owning project Session once per request ID, resolving after the Session receives it. */
+  deliver(requestId: string, text: string, projectId?: string): Promise<void>
+  candidateCard(candidate: Candidate, projectId?: string): Promise<Record<string, unknown>>
 }
 
 /** Schema for bounded context or repository read requests during an active evaluation (`orchestrator_eval_read`). */
@@ -100,7 +101,9 @@ export class MasterAssessor implements Assessor {
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
       const candidate = this.host.engine.candidate(triggerId)
       if (candidate?.evalId !== evalId) return
-      await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
+      const projects = candidate.triggers.map(trigger => this.host.projectForTrigger(trigger))
+      const projectId = projects[0] && projects.every(project => project === projects[0]) ? projects[0] : undefined
+      await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate, projectId) }), projectId)
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
   }
@@ -232,8 +235,9 @@ export class MasterAssessor implements Assessor {
       const { cache } = this.reads(candidate.evalId, trigger)
       const { snapshots, images, messages, cursors } = cache
       const repositoryReadRequested = read.resource === 'file' || read.resource === 'directory'
-      const project = repositoryReadRequested ? projectForTrigger(this.host.deployment, trigger) : undefined
-      const scoped = project ? this.host.commands.forSource(project.id) : this.host.commands
+      const project = repositoryReadRequested ? this.host.projectForTrigger(trigger) : undefined
+      if (repositoryReadRequested && !project) throw new Error('This Trigger has no verifiable ProjectSource; repository reads are unavailable')
+      const scoped = project ? this.host.commands.forSource(project) : this.host.commands
       const commands = scoped.withSignal(AbortSignal.any([this.controller.signal, signal]))
       if (read.resource === 'image') {
         if (read.offset !== 0) throw new Error('Images are not paginated; use offset 0')

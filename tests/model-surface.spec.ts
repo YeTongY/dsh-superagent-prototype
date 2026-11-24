@@ -13,6 +13,7 @@ import { promptParts } from '../src/app/prompts.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { Runtime } from '../src/app/runtime.ts'
+import { projectOrchestratorSessionId } from '../src/app/sessions.ts'
 import { workerSessionId } from '../src/executor/dsh.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
@@ -158,7 +159,7 @@ type Host = Awaited<ReturnType<typeof start>>
 /** Exercise the orchestrator and worker workflows so all runtime-generated prompt sections, cards, notices, and errors are emitted. */
 async function drive(host: Host) {
   const { runtime, run } = host
-  const master = runtime.masterId
+  const master = routerId
   // Candidates wait, which the main Session decides in one call: a request it accepts, thanks it ignores, and plain chat in the
   // channel, a proactive candidate whose card shows it touches no rule, which it ignores from its card.
   const request = feishu('1', '@bot 修一下回归'), thanks = feishu('3', '@bot 谢谢'), chat = feishu('4', '中午吃什么', { mentions: [] })
@@ -246,7 +247,7 @@ function collect(host: Host, { a, b, workerA, workerB, refusal }: Awaited<Return
   const surfaces: Surface[] = []
   const config = runtime.prompts.current().config
   const shared = new Set(['runtime/shared', 'communication', 'scope', 'delivery', 'runtime/subscriptions', 'runtime/replies'])
-  for (const [role, sessionId] of [['orchestrator', runtime.masterId], ['worker', workerA], ['worker', workerB]] as const) {
+  for (const [role, sessionId] of [['orchestrator', routerId], ['worker', workerA], ['worker', workerB]] as const) {
     const parts = promptParts(config, role)
     for (const { name, text } of parts) {
       surfaces.push({ where: `${role} prompt ${name}`, owner: PROMPTS, role: shared.has(name) ? 'both' : role, text })
@@ -255,18 +256,18 @@ function collect(host: Host, { a, b, workerA, workerB, refusal }: Awaited<Return
     const generated = parts.reduce((text, part) => text.replace(part.text, ''), host.sections.get(sessionId)!({}))
     surfaces.push({ where: `${role} prompt from the runtime`, owner: SESSIONS, role, text: generated })
   }
-  for (const [role, sessionId] of [['orchestrator', runtime.masterId], ['worker', workerA]] as const) {
+  for (const [role, sessionId] of [['orchestrator', routerId], ['worker', workerA]] as const) {
     for (const tool of host.tools.get(sessionId)!.values()) {
       const descriptions = [tool.description]
       walk(tool.parameters, node => { if (typeof node.description === 'string') descriptions.push(node.description) })
       surfaces.push({ where: `${role} tool ${tool.name}`, owner: TOOLS, role, text: descriptions.join('\n') })
     }
   }
-  for (const { name, description, content } of host.skills.get(runtime.masterId)!) {
+  for (const { name, description, content } of host.skills.get(routerId)!) {
     surfaces.push({ where: `skill ${name}`, owner: PROMPTS, role: 'both', text: `${description}\n${content}` })
   }
   surfaces.push({ where: 'orchestrator tool orchestrator_reply error', owner: ERRORS, role: 'orchestrator', text: refusal })
-  for (const { text } of host.inputs.filter(input => input.sessionId === runtime.masterId)) {
+  for (const { text } of host.inputs.filter(input => input.sessionId === routerId)) {
     const value = JSON.parse(text) as Record<string, unknown>
     const kind = String(value.kind ?? Object.keys(value)[0])
     const owner = kind === 'candidate' ? LINKS : kind === 'worker_attention' ? TOOLS : kind === 'worker_report' ? EXECUTOR : NOTICES
@@ -291,6 +292,7 @@ function collect(host: Host, { a, b, workerA, workerB, refusal }: Awaited<Return
   return surfaces
 }
 
+const routerId = projectOrchestratorSessionId('github')
 let host: Host
 let sessions: Awaited<ReturnType<typeof drive>>
 let surfaces: Surface[]
@@ -300,7 +302,7 @@ beforeAll(async () => {
   surfaces = collect(host, sessions)
 })
 afterAll(async () => { await host?.stop() })
-const toolsOf = (role: Role) => host.tools.get(role === 'orchestrator' ? host.runtime.masterId : sessions.workerA)!
+const toolsOf = (role: Role) => host.tools.get(role === 'orchestrator' ? routerId : sessions.workerA)!
 
 /** Check collected surfaces for unregistered tools, invalid enum options, legacy terms, banned phrases, and cross-role tool references. */
 function failures(): Map<string, string> {
@@ -383,7 +385,7 @@ it('enforces the word limits the text states', async () => {
   expect(checkedImText(words(IM_WORDS))).toBe(words(IM_WORDS))
   expect(() => checkedImText(words(IM_WORDS + 1))).toThrow(`maximum is ${IM_WORDS}`)
   const attach = (note: string) =>
-    host.run(host.runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: 'unknown', trigger_id: 'unknown', note }] })
+    host.run(routerId, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: 'unknown', trigger_id: 'unknown', note }] })
   // A note over the limit refuses its item alone; one at the limit goes on to the Engine, which knows no such ticket.
   expect(await attach(words(NOTE_WORDS + 1))).toEqual({ results: [expect.objectContaining({ refused: expect.stringContaining(`${NOTE_WORDS} words`) })] })
   expect(await attach(words(NOTE_WORDS))).toEqual({ results: [expect.objectContaining({ refused: expect.stringMatching(/Unknown (ticket|trigger)/) })] })
@@ -392,7 +394,7 @@ it('enforces the word limits the text states', async () => {
 /** The enabled rules' lines of the main Session's Policy section, as the settings hold them now. */
 const ruleLines = () => host.runtime.store.settings().policy.rules.filter(rule => rule.enabled).map(rule => `- ${rule.name} (${rule.id}): ${rule.instruction}`)
 it.each(['orchestrator', 'worker'] as const)('keeps the %s within its character budget', role => {
-  const ids = role === 'orchestrator' ? [host.runtime.masterId] : [sessions.workerA, sessions.workerB]
+  const ids = role === 'orchestrator' ? [routerId] : [sessions.workerA, sessions.workerB]
   // Strip machine-dependent variable values (such as directory paths), and the team's rules, before measuring prompt length.
   const builtIn = (text: string) => ruleLines().reduce((rest, line) => rest.replace(line, ''), text).replace(/ = "[^"\n]*"/g, ' = ""')
   const prompt = Math.max(...ids.map(id => builtIn(host.sections.get(id)!({})).length))
@@ -410,7 +412,7 @@ it('keeps the routing rules in dispatch, which says the main Session may accept 
 })
 
 it('lists in the main Session\'s Policy section exactly the enabled rules, as the drive\'s save left them', () => {
-  const text = host.sections.get(host.runtime.masterId)!({}), at = text.indexOf('## Policy')
+  const text = host.sections.get(routerId)!({}), at = text.indexOf('## Policy')
   const listed = text.slice(at, text.indexOf('\n\n', at)).split('\n').filter(line => line.startsWith('- '))
   expect(listed).toEqual(ruleLines())
   // The drive disabled the visual rule and changed the copy rule's instruction.

@@ -94,13 +94,14 @@ it('runs prepare commands in the background, side by side, while accepts, intake
     const accepted = await h.route({ kind: 'accept', trigger_id: trigger.id, title: 'fix', worktree_name: `fix-${index}`, acknowledgement: '收到。' })
     expect(accepted).toMatchObject({ decision: 'accept', ticket: { state: 'working/queued' } })
   }
-  await waitUntil(() => prepares() === 2)
-  // A Source loop's next message is stored at once, and a pass relays it while both prepare commands still run.
-  const later = github('3', '@agent-bot 修三', {}, 3)
-  expect(h.runtime.receive(later)).toBe('stored')
-  await h.runtime.pump()
-  expect(h.candidates()).toEqual([...first, later].map(trigger => trigger.id))
-  prepare.resolve()
+  try {
+    await waitUntil(() => prepares() === 2)
+    // The candidate reaches its orchestrator without waiting for either prepare command.
+    const later = github('3', '@agent-bot 修三', {}, 3)
+    expect(h.runtime.receive(later)).toBe('stored')
+    await h.runtime.pump()
+    await vi.waitFor(() => expect(h.candidates()).toEqual([...first, later].map(trigger => trigger.id)))
+  } finally { prepare.resolve() }
   await h.runtime.idle()
   expect(h.runtime.store.tickets.list().map(ticket => ticket.assignments.at(-1)!.state)).toEqual(['running', 'running'])
 })
@@ -337,7 +338,7 @@ describe('a worker whose work runs in the background', () => {
     before?.(one.ticket.id)
     const job = h.jobs.run(one.sessionId, 'pnpm dev'), child = h.subagents.spawn(one.sessionId)
     await h.runTool(one.sessionId, 'orchestrator_report', report); await h.runtime.idle()
-    const relayed = h.relays(h.runtime.masterId).length
+    const relayed = h.relays(h.routerId).length
     idle(one.sessionId); await h.runtime.idle()
     // The subagent stops, and the turn its end woke is cancelled; the job's end is collected.
     await vi.waitFor(() => expect(h.subagents.live(child)).toBe(false))
@@ -353,7 +354,7 @@ describe('a worker whose work runs in the background', () => {
       content: [expect.objectContaining({ text: `Your background job ${job} (pnpm dev) ended: completed.` })] })))
     await h.runtime.idle()
     expect(h.runtime.executor.activeCount()).toBe(0)
-    expect(h.relays(h.runtime.masterId)).toHaveLength(relayed)
+    expect(h.relays(h.routerId)).toHaveLength(relayed)
     expect(latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)?.report).toMatchObject({ state: report.state })
     return one
   }
@@ -500,7 +501,7 @@ describe('a worker whose work runs in the background', () => {
       text: `Your background jobs ran 30 minutes after your turn ended and were killed: ${job} (pnpm test).` })] }))
     // Stopping its subagent would wake it with the end, in the Assignment it was just reported waiting in.
     expect(h.subagents.live(child)).toBe(true)
-    expect(h.relays(h.runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'waiting' })
+    expect(h.relays(h.routerId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'waiting' })
   })
   it('says a worker\'s subagents still run when only they ran 30 minutes after the turn ended', async () => {
     const one = await h.acceptedTicket(github('1', '@agent-bot 修一'))
@@ -553,7 +554,7 @@ describe('a worker whose work runs in the background', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
     const late = expect.objectContaining({ sessionId: one.sessionId, text: expect.stringContaining('One more thing') })
     expect(h.deliveries).not.toHaveBeenCalledWith(late)
-    const reports = () => h.relays(h.runtime.masterId).filter(item => item.kind === 'worker_report').length
+    const reports = () => h.relays(h.routerId).filter(item => item.kind === 'worker_report').length
     const reported = reports()
     gate.resolve()
     await vi.waitFor(() => expect(h.deliveries).toHaveBeenCalledWith(late))
@@ -773,14 +774,14 @@ describe('what a worker read', () => {
 it('reports nothing for a worker whose turn ends while it waits out the backoff of a passing failure', async () => {
   const one = await h.acceptedTicket(github('1', '@agent-bot 修一'))
   const agent = h.agents.get(one.sessionId)!
-  const relayed = h.relays(h.runtime.masterId).length
+  const relayed = h.relays(h.routerId).length
   h.ctx.emit('agent/error', { agent, turn: 1, step: 1, error: Object.assign(new Error('Service Unavailable'), { status: 503 }) } as never)
   agent.status = 'idle'
   h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
   await h.runtime.idle()
   await new Promise(resolve => setTimeout(resolve, 20))
   expect(latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)?.report).toBeUndefined()
-  expect(h.relays(h.runtime.masterId)).toHaveLength(relayed)
+  expect(h.relays(h.routerId)).toHaveLength(relayed)
 })
 it('wakes an idle worker for a status request in the slot kept for a person, while every other slot is taken', async () => {
   const settings = h.runtime.store.settings()

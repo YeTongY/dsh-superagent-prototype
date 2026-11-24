@@ -21,6 +21,7 @@ import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import type { SourceContext } from '../src/sources/host.ts'
 import { SetupError, type SetupProblem } from '../src/setup.ts'
+import { settingsView } from '../src/app/views/settings.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -173,6 +174,39 @@ describe('feishu source', () => {
     expect(await context.read(commands, legacy, 'thread', undefined, reboundConfig)).toMatchObject({ status: 'project_scoped_message',
       messages: [{ id: 'om_source', text: 'only this project message' }] })
     expect(lark).toHaveBeenCalledTimes(2)
+  })
+  it('shows each Feishu chat’s configured project and offers resolved ProjectSources in settings', () => {
+    const first = { id: 'github', provider: 'github' as const, host: 'github.com', project: 'acme/one', cli: 'gh', login: 'agent', noreply: 'agent@example.test' }
+    const second = { id: 'gitlab', provider: 'gitlab' as const, host: 'git.internal', project: 'acme/two', cli: 'glab', login: 'agent', noreply: 'agent@example.test' }
+    const deployment = testDeployment({ projects: { github: first, gitlab: second } })
+    const h = host({ deployment })
+    const current = h.store.settings()
+    h.store.saveSettings({ ...current, sources: { ...current.sources, feishu: { ...current.sources.feishu!, config: {
+      ...current.sources.feishu!.config, chats: [
+        { chatId: 'oc_one', projectSourceId: 'github', listen: 'all' },
+        { chatId: 'oc_two', listen: 'mentions' },
+      ],
+    } } } })
+    const sessions = [
+      { project_source_id: 'github', repository: 'acme/one', host: 'github.com', session_id: 'router-one', status: 'idle' as const,
+        enabled: true, ready: true },
+      { project_source_id: 'gitlab', repository: 'acme/two', host: 'git.internal', session_id: 'router-two', status: 'missing' as const,
+        enabled: true, ready: true },
+    ]
+    const view = settingsView(h.store, h.sources, h.health, { deployment, problem: undefined, feishuProblem: undefined }, '/srv/state', sessions)
+    const source = view.sources.find(item => item.kind === 'feishu')!
+    expect(source.projectBindings).toEqual([
+      { chat_id: 'oc_one', chat_name: 'oc_one', project_source_id: 'github', project_label: 'github:github.com/acme/one (github)',
+        session: sessions[0] },
+      { chat_id: 'oc_two', chat_name: 'oc_two', problem: 'project_not_bound' },
+    ])
+    const chats = source.fields.find(field => field.key === 'chats')
+    expect(chats?.type).toBe('rows')
+    if (chats?.type === 'rows') {
+      const project = chats.columns.find(column => column.key === 'projectSourceId')
+      expect(project?.type === 'select' && project.options.map(option => option.value)).toEqual(['', 'github', 'gitlab'])
+    }
+    h.store.close()
   })
   it('registers its kind without a bot, and names on its health what setup still needs', async () => {
     const run = async (overrides: Partial<SourceContextDeps>) => {

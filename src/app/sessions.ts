@@ -35,12 +35,24 @@ export interface SessionsHost {
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
   readonly masterId: string
+  readonly stateDir: string
+  /** Enabled project sources whose setup is ready and therefore own a managed Orchestrator Session. */
+  projectIds(): readonly string[]
+  /** Configured project identity for a deterministic project Session ID, including disabled or unready sources. */
+  projectIdForSession(sessionId: string): string | undefined
+  /** All configured project sources and their readiness for the management view. */
+  projectSources(): readonly { id: string; enabled: boolean; ready: boolean; repository: string; host?: string }[]
+  /** Resolve a persisted domain object to its owning ProjectSource for durable effect recovery. */
+  projectForTrigger(triggerId: string): string | undefined
+  projectForTicket(ticketId: string): string | undefined
+  projectForThread(threadKey: string): string | undefined
+  projectForReporter(runId: string): string | undefined
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
   /** Tools to register on the main, worker, or explicitly identified Reporter Session. */
-  tools(agent: Agent, ticket?: Ticket, reporter?: ReporterSessionContext): Tool[]
+  tools(agent: Agent, ticket?: Ticket, reporter?: ReporterSessionContext, projectId?: string): Tool[]
   /** Reporter run metadata; DSH remains the owner of the Session itself. */
   reporter?(sessionId: string): ReporterSessionContext | undefined
 }
@@ -67,10 +79,24 @@ function reporterInstructions(context: ReporterSessionContext): string {
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
-interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true; reporter?: true }
+interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true; reporter?: true; projectId?: string }
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router', REPORTER_PRESET = 'dsh-superagent-reporter'
+
+/** Stable DSH identity for the Orchestrator that owns one ProjectSource. */
+export function projectOrchestratorSessionId(projectId: string): string {
+  return `orchestrator-${key('project-orchestrator', projectId)}`
+}
+
+function isProjectOrchestratorId(sessionId: string, masterId: string): boolean {
+  return sessionId !== masterId && /^orchestrator-[a-f0-9]{32}$/.test(sessionId)
+}
+
+/** Project Orchestrators use an empty, per-project DSH workspace rather than the shared state or a repository checkout. */
+export function projectOrchestratorWorkspace(stateDir: string, projectId: string): string {
+  return join(stateDir, 'project-orchestrators', key('project-orchestrator-workspace', projectId))
+}
 
 /** Serialize a tool result as text while passing a top-level DSH image reference through its native image block. */
 export function renderSessionToolOutput(value: unknown): ContentBlock[] {
@@ -116,34 +142,9 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
-/** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
-const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
-  + 'end the turn instead of waiting for them.'
-/** What a main Session under `standard` is told when its command would wait the shell's default. */
-const DEFAULT_WAIT = 'This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000, or run_in_background, '
-  + 'as a waiting step holds back new candidates.'
-/** `sleep` at a command position: the start, after ; & | ( { ! ` or a newline, or after a keyword or a command that runs it. */
-const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|nohup|command|env)\s)\s*(?:\S*\/)?sleep\b/
-/**
- * The main Session's guard: it refuses a bash command that runs sleep or asks to hold the step longer than 30 seconds, and a
- * job wait longer than 5 seconds. Under `standard`, as a main Session created before the router preset runs, the shell holds
- * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
- * job wait its timeout; the router preset ends both after 5 seconds.
- */
-function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
-  const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
-  if (name === 'bash') {
-    const sleeps = typeof args.command === 'string' && SLEEP.test(args.command)
-    if (sleeps || typeof args.timeoutMs === 'number' && args.timeoutMs > 30_000) return NO_WAIT
-    if (args.timeoutMs === undefined && args.run_in_background !== true && !routed()) return DEFAULT_WAIT
-  }
-  if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
-  return undefined
-}
-
 /**
  * Creates and decorates orchestrator and worker DSH `Agent` sessions with role models, system prompt sections from `Prompts`, runtime skills, and restricted tool sets.
- * `Runtime`, `DshExecutor`, `MasterAssessor`, `Settings`, and management routes/tools use it to ensure sessions, deliver deduplicated messages via `AgentDelivery`, and process ordered `relay` and `notice` effects.
+ * `Runtime`, `DshExecutor`, `MasterAssessor`, `Settings`, and management routes/tools use it to ensure sessions, deliver deduplicated messages via `AgentDelivery`, and process project-partitioned `relay` and `notice` effects.
  * Feeds session events into `RetryHealth` to report model budget waits on the `models` `HealthEntry`, and durably records which prompt revisions each session has worked under in `Store` (`KV.sessions.prompts`) to authorize prompt version reads.
  */
 export class Sessions {
@@ -151,14 +152,37 @@ export class Sessions {
   /** Decorated agents mapped to their registered disposers and skill scope until the agent is disposed or `Sessions.dispose()` runs. */
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
+  private readonly projectSessionFailures = new Map<string, string>()
+  private readonly projectSessionEnsures = new Map<string, Promise<Agent>>()
   private readonly ctx: Context
-  /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
+  /** Registers project-partitioned `relay` and `notice` effect handlers. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
     this.agentDelivery = new AgentDelivery(host.context)
-    // Deliver relays and notices to the main Session in the order they were queued.
-    host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
-    host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
+    // A failed effect for one project must not hold work for another; rows remain ordered inside each project partition.
+    host.effects.handle('relay', async (payload, requestId) => {
+      const projectId = payload.projectId ?? this.projectFromRelay(payload.text, requestId)
+      await this.ensureEffectProject(projectId)
+      await this.prompt(this.requireProjectSession(projectId), requestId, payload.text, 'steer')
+    }, { limit: () => 16, partition: (payload, requestId) => `project:${payload.projectId ?? this.projectFromRelay(payload.text, requestId)}` })
+    host.effects.handle('notice', async (payload, name) => {
+      // Historical Feishu settings notices linked to a global settings resource that project sessions cannot read.
+      // The new save path does not enqueue them; consume old rows so they do not retry forever or expose bot settings.
+      if ((payload.name ?? name) === 'settings:source:feishu') return
+      const projectId = payload.projectId ?? this.projectFromNotice(name, payload)
+      if (projectId) {
+        await this.ensureEffectProject(projectId)
+        await this.inject(projectId, payload.name ?? name, payload.value, payload.summary)
+        return
+      }
+      if (!payload.allProjects && !this.isLegacyGlobalNotice(name)) throw new Error(`Cannot determine the ProjectSource for queued notice ${name}`)
+      const projects = host.projectIds()
+      if (!projects.length) throw new Error(`No ready ProjectSource can receive queued notice ${name}`)
+      for (const id of projects) {
+        await this.ensureEffectProject(id)
+        await this.inject(id, payload.name ?? name, payload.value, payload.summary)
+      }
+    }, { limit: () => 16, partition: (payload, name) => `project:${payload.projectId ?? this.projectFromNotice(name, payload) ?? `legacy:${name}`}` })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
@@ -180,7 +204,9 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET
+        const isProjectSession = isProjectOrchestratorId(sessionId, this.host.masterId)
+        const projectOrchestrator = this.host.projectIdForSession(sessionId) !== undefined || isProjectSession
+        const ours = projectOrchestrator ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET
           : this.host.reporter?.(sessionId) ? REPORTER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
@@ -194,6 +220,32 @@ export class Sessions {
   /** Resolves or creates a persistent DSH session and applies its role-specific model, prompt, tools and workspace. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
     return this.ensureWithModel(id, cwd, title, role)
+  }
+  /** Creates or resumes the stable, project-scoped Orchestrator DSH Session. */
+  async ensureProjectOrchestrator(projectId: string, stateDir: string, title: string): Promise<Agent> {
+    const id = projectOrchestratorSessionId(projectId)
+    if (this.host.closing()) throw new Error('Runtime is stopping')
+    if (this.host.projectIdForSession(id) !== projectId || !this.host.projectIds().includes(projectId)) {
+      throw new Error(`ProjectSource ${projectId} is not ready for an Orchestrator Session`)
+    }
+    const pending = this.projectSessionEnsures.get(projectId)
+    if (pending) return pending
+    const ensure = this.ensureWithModel(id, projectOrchestratorWorkspace(stateDir, projectId), title, 'orchestrator')
+      .then(agent => { this.projectSessionFailures.delete(projectId); return agent })
+      .catch(error => {
+        const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+          ? error.code : error instanceof Error ? error.name : 'session_unavailable'
+        this.projectSessionFailures.set(projectId, /^[A-Za-z0-9_.:-]{1,100}$/.test(code) ? code : 'session_unavailable')
+        throw error
+      }).finally(() => { this.projectSessionEnsures.delete(projectId) })
+    this.projectSessionEnsures.set(projectId, ensure)
+    return ensure
+  }
+  private async ensureEffectProject(projectId: string | undefined): Promise<void> {
+    if (!projectId || !this.host.projectIds().includes(projectId)) throw new Error(`No ready ProjectSource can receive this Orchestrator message${projectId ? ` (${projectId})` : ''}`)
+    const project = this.host.projectSources().find(item => item.id === projectId)
+    const label = project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository || projectId
+    await this.ensureProjectOrchestrator(projectId, this.host.stateDir, `dsh-superagent orchestrator ${label}`)
   }
   /** Creates or resumes a Reporter Session with a DSH-supported selection and returns that exact selection for its run view. */
   async ensureReporter(id: string, cwd: string, title: string): Promise<RoleModel> {
@@ -222,7 +274,8 @@ export class Sessions {
     if (role === 'reporter' && !model) throw new Error('Reporter DSH model selection is unavailable')
     await initializeRoleModel(ctx, result.agent, model)
     await this.decorate(result.agent)
-    if (role !== 'reporter') ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
+    if (role === 'worker') ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
+    else if (role === 'orchestrator' && this.host.projectIdForSession(id)) ctx.permissionPresets.set(result.agent.session, 'workspace-write')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
@@ -241,30 +294,65 @@ export class Sessions {
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
   /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
-  relay(requestId: string, text: string): void { this.host.effects.enqueue('relay', requestId, { text }) }
+  relay(requestId: string, text: string, projectId?: string): void {
+    this.host.effects.enqueue('relay', requestId, { text, ...(projectId ? { projectId } : {}) })
+  }
   /** Enqueues a durable background notice for injection into the main Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
-  notify(name: string, value: Record<string, unknown>, summary: string): void { this.host.effects.enqueue('notice', name, { value, summary }) }
+  notify(name: string, value: Record<string, unknown>, summary: string, projectId?: string): void {
+    if (projectId && this.host.projectSources().some(project => project.id === projectId)) {
+      this.host.effects.enqueue('notice', this.noticeKey(projectId, name), { name, projectId, value, summary })
+      return
+    }
+    if (projectId && projectId !== 'feishu') {
+      // Unknown project identities are retained for diagnosis instead of leaking into every project's Session.
+      this.host.effects.enqueue('notice', this.noticeKey(projectId, name), { name, projectId, value, summary })
+      return
+    }
+    const projects = this.host.projectIds()
+    if (!projects.length) {
+      this.host.effects.enqueue('notice', name, { name, value, summary, allProjects: true })
+      return
+    }
+    for (const id of projects) this.host.effects.enqueue('notice', this.noticeKey(id, name), { name, projectId: id, value, summary })
+  }
   /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached the main Session or `'pending'` if it is still queued. */
   async delivery(name: string): Promise<'injected' | 'pending'> {
     await this.host.effects.idle('notice')
-    return this.host.effects.pending('notice', name) ? 'pending' : 'injected'
+    return this.noticePending(name) ? 'pending' : 'injected'
   }
   /** Injects a notice into the main Session without waking it; no-op if the main Session does not exist yet. */
-  private async inject(name: string, value: Record<string, unknown>, summary: string): Promise<void> {
-    const resolved = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
-    if ('error' in resolved) return
+  private async inject(projectId: string, name: string, value: Record<string, unknown>, summary: string): Promise<void> {
+    const resolved = await this.ctx.sessionController.resolveAgent(this.requireProjectSession(projectId) as SessionId)
+    if ('error' in resolved) throw resolved.error
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
     const text = JSON.stringify(value)
-    await this.agentDelivery.send(resolved.agent, `notice:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime)
+    await this.agentDelivery.send(resolved.agent, `notice:${projectId}:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime)
   }
   /** Returns the current prompt revision, the active prompt revision of each loaded Session, and whether the main Session still has a pending `'prompts'` notice. */
   status() {
-    const { store, prompts, effects } = this.host
+    const { store, prompts } = this.host
     const sessions = store.keys(KV.sessions.prompts).flatMap(name => {
       const sessionId = name.slice(KV.sessions.prompts.prefix.length), revision = store.get(name)?.at(-1)
       return this.ctx.agents.get(sessionId as SessionId) && revision !== undefined ? [{ sessionId, revision }] : []
     })
-    return { revision: prompts.current().revision, sessions, notificationPending: effects.pending('notice', 'prompts') }
+    return { revision: prompts.current().revision, sessions, notificationPending: this.noticePending('prompts'),
+      project_orchestrators: this.projectOrchestrators() }
+  }
+  /** Stable project Session identities and their live DSH status for the management view. */
+  projectOrchestrators() {
+    return this.host.projectSources().map(project => {
+      const sessionId = projectOrchestratorSessionId(project.id), agent = this.ctx.agents.get(sessionId as SessionId)
+      return { project_source_id: project.id, session_id: sessionId,
+        status: this.projectSessionFailures.has(project.id) ? 'error' as const
+          : agent?.status === 'running' ? 'running' as const : agent ? 'idle' as const : 'missing' as const,
+        enabled: project.enabled, ready: project.ready, repository: project.repository, ...(project.host ? { host: project.host } : {}),
+        ...(this.projectSessionFailures.get(project.id) ? { error: this.projectSessionFailures.get(project.id) } : {}) }
+    })
+  }
+  /** Active project Orchestrator sessions, including sessions whose ProjectSource was removed after they were created. */
+  projectSessionIds(): string[] {
+    return [...this.bindings.keys()].map(agent => agent.id)
+      .filter(id => isProjectOrchestratorId(id, this.host.masterId))
   }
   /** Returns the prompt version a Session runs under (the one bound on its latest model request, or the current version). */
   promptVersion(sessionId: string): PromptVersion {
@@ -296,6 +384,114 @@ export class Sessions {
       ? { state: 'error', detail: retries.slice(0, 5).map(item => `${item.sessionId}: ${item.provider} is over its model budget; retried ${item.attempts} times, waiting since ${item.since}; the model and retry policy are unchanged`).join('; ') + (retries.length > 5 ? `; ${retries.length - 5} more Sessions` : ''), at: retries.at(-1)!.lastAt }
       : { state: 'ready', detail: 'No managed Session is waiting on a model budget retry' })
   }
+  private noticeKey(projectId: string, name: string): string { return `project:${projectId}:${name}` }
+  private noticePending(name: string): boolean {
+    return this.host.effects.pending('notice', name)
+      || this.host.projectSources().some(project => this.host.effects.pending('notice', this.noticeKey(project.id, name)))
+  }
+  private requireProjectSession(projectId: string | undefined): string {
+    if (!projectId || !this.host.projectIds().includes(projectId)) {
+      throw new Error(`A ready ProjectSource is required for this Orchestrator message${projectId ? ` (${projectId})` : ''}`)
+    }
+    return projectOrchestratorSessionId(projectId)
+  }
+  /** Recover ownership from the source object embedded in pre-upgrade durable relays. */
+  private projectFromRelay(text: string, requestId: string): string {
+    let value: unknown
+    try { value = JSON.parse(text) } catch { value = undefined }
+    const objects: Record<string, unknown>[] = []
+    const visit = (item: unknown, depth = 0) => {
+      if (!item || typeof item !== 'object' || depth > 5) return
+      objects.push(item as Record<string, unknown>)
+      for (const child of Object.values(item)) if (child && typeof child === 'object') visit(child, depth + 1)
+    }
+    visit(value)
+    const owners = new Set<string>()
+    for (const item of objects) {
+      const triggerId = typeof item.trigger_id === 'string' ? item.trigger_id : undefined
+      if (triggerId) {
+        const project = this.host.projectForTrigger(triggerId)
+        if (project) owners.add(project)
+      }
+      const ticketId = typeof item.ticket_id === 'string' ? item.ticket_id : undefined
+      if (ticketId) {
+        const project = this.host.projectForTicket(ticketId)
+        if (project) owners.add(project)
+      }
+      const runId = typeof item.run_id === 'string' ? item.run_id : undefined
+      if (runId) {
+        const project = this.host.projectForReporter(runId)
+        if (project) owners.add(project)
+      }
+    }
+    const fromKey = /^attention:([^:]+):/.exec(requestId)?.[1]
+    if (fromKey) {
+      const project = this.host.projectForTicket(fromKey)
+      if (project) owners.add(project)
+    }
+    const reporterRun = /^reporter-(?:candidate|report):([^:]+):/.exec(requestId)?.[1]
+    if (reporterRun) {
+      const project = this.host.projectForReporter(reporterRun)
+      if (project) owners.add(project)
+    }
+    if (owners.size > 1) throw new Error(`Conflicting ProjectSource references for queued relay ${requestId}`)
+    if (owners.size === 1) return owners.values().next().value!
+    throw new Error(`Cannot determine the ProjectSource for queued relay ${requestId}`)
+  }
+  /** Recover ownership from old notice keys and their persisted Trigger/Ticket/Thread references. */
+  private projectFromNotice(name: string, payload: { value: Record<string, unknown> }): string | undefined {
+    const value = payload.value
+    const owners = new Set<string>()
+    const triggerId = typeof value.trigger_requeued === 'string' ? value.trigger_requeued
+      : typeof value.trigger_id === 'string' ? value.trigger_id : undefined
+    if (triggerId) {
+      const project = this.host.projectForTrigger(triggerId)
+      if (project) owners.add(project)
+    }
+    const nestedId = (key: string) => {
+      const item = value[key]
+      return item && typeof item === 'object' && typeof (item as Record<string, unknown>).ticket_id === 'string'
+        ? String((item as Record<string, unknown>).ticket_id) : undefined
+    }
+    const nestedThread = (key: string) => {
+      const item = value[key]
+      return item && typeof item === 'object' && typeof (item as Record<string, unknown>).thread === 'string'
+        ? String((item as Record<string, unknown>).thread) : undefined
+    }
+    const ticketId = typeof value.ticket_id === 'string' ? value.ticket_id
+      : nestedId('ticket_ended') ?? nestedId('thread_unrelated') ?? nestedId('thread_followed')
+    if (ticketId) {
+      const project = this.host.projectForTicket(ticketId)
+      if (project) owners.add(project)
+    }
+    const referencedThread = typeof value.thread === 'string' ? value.thread
+      : nestedThread('thread_unrelated') ?? nestedThread('thread_followed')
+    if (referencedThread) {
+      const project = this.host.projectForThread(referencedThread)
+      if (project) owners.add(project)
+    }
+    const thread = /^subscription:(.+)$/.exec(name)?.[1]
+    if (thread) {
+      const project = this.host.projectForThread(thread)
+      if (project) owners.add(project)
+      // Legacy Thread keys already namespaced by the single-source Provider can be recovered without choosing
+      // whichever ProjectSource happens to remain enabled after an upgrade.
+      const source = thread.slice(0, thread.indexOf(':'))
+      if (source && this.host.projectSources().some(project => project.id === source)) {
+        owners.add(source)
+      }
+    }
+    const sourceBlock = /^settings:source:(.+)$/.exec(name)?.[1]
+    if (sourceBlock && sourceBlock !== 'feishu' && this.host.projectSources().some(project => project.id === sourceBlock)) {
+      owners.add(sourceBlock)
+    }
+    if (owners.size > 1) throw new Error(`Conflicting ProjectSource references for queued notice ${name}`)
+    if (owners.size === 1) return owners.values().next().value
+    return undefined
+  }
+  private isLegacyGlobalNotice(name: string): boolean {
+    return name === 'prompts' || name === 'settings' || /^settings:(?:policy|eval|executor|pause|source:feishu)$/.test(name)
+  }
   private ticketOf(agent: Agent): Ticket | undefined {
     const ticketId = ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
@@ -303,11 +499,34 @@ export class Sessions {
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
-    const master = agent.id === host.masterId
-    const ticket = master ? undefined : this.ticketOf(agent)
-    const reporter = !master && !ticket ? host.reporter?.(agent.id) : undefined
-    if (!master && !ticket && !reporter) { this.limitSubagent(agent); return }
-    const binding: SessionBinding = { disposers: [], ...(reporter ? { reporter: true as const } : {}) }
+    const projectId = host.projectIdForSession(agent.id)
+    // Retain the historical global master Session for DSH UI/history only. It receives no new managed input and cannot
+    // route or execute work across projects if an operator opens it manually.
+    if (agent.id === host.masterId) {
+      const binding: SessionBinding = { disposers: [] }
+      this.bindings.set(agent, binding)
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill'] }), agent.ctx.tools.guard(() => 'This historical Session is read-only; use the project Orchestrator Session.'))
+      return
+    }
+    if (isProjectOrchestratorId(agent.id, host.masterId) && !projectId) {
+      // Project ids are hashed into their stable Session ids. If configuration was removed, the owner can no longer be
+      // recovered, so keep the orphaned Session available for history while refusing all actions.
+      const binding: SessionBinding = { disposers: [] }
+      this.bindings.set(agent, binding)
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill'] }), agent.ctx.tools.guard(() => 'This project Session has no configured ProjectSource and is read-only.'))
+      return
+    }
+    const projectMaster = projectId !== undefined
+    if (projectMaster && !host.projectIds().includes(projectId)) {
+      const binding: SessionBinding = { disposers: [], projectId }
+      this.bindings.set(agent, binding)
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill'] }), agent.ctx.tools.guard(() => `ProjectSource ${projectId} is not ready; this Session is read-only.`))
+      return
+    }
+    const ticket = projectMaster ? undefined : this.ticketOf(agent)
+    const reporter = !projectMaster && !ticket ? host.reporter?.(agent.id) : undefined
+    if (!projectMaster && !ticket && !reporter) { this.limitSubagent(agent); return }
+    const binding: SessionBinding = { disposers: [], ...(reporter ? { reporter: true as const } : {}), ...(projectId ? { projectId } : {}) }
     this.bindings.set(agent, binding)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
@@ -317,9 +536,9 @@ export class Sessions {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = reporter ? reporterInstructions(reporter)
-        : host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
+        : host.prompts.compose(version.config, projectMaster ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined, projectId)
       return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
-    }, ...(master ? { complete: true } : {}) }))
+    }, ...(projectMaster ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
       binding.scope = scope
@@ -331,10 +550,16 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket, reporter)) register(tool.name, tool.description, tool.schema, tool.execute)
-    if (master) {
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
-        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+    const tools = host.tools(agent, ticket, reporter, projectId)
+    for (const tool of tools) register(tool.name, tool.description, tool.schema, tool.execute)
+    if (projectMaster) {
+      // Project routers receive bounded reads through their own tools. Do not expose inherited filesystem, shell, job or web tools.
+      // A guard also refuses raw tools if another plugin registers one in this Agent's local scope, where `restrict` cannot mask it.
+      const localTools = new Set(tools.map(tool => tool.name))
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill'] }), agent.ctx.tools.guard(execution => {
+        if (!host.projectIds().includes(projectId)) return `ProjectSource ${projectId} is not ready; orchestration is unavailable`
+        if (execution.name !== 'skill' && !localTools.has(execution.name)) return 'Project Orchestrators may use only project-scoped orchestration tools and skills'
+      }))
     } else if (reporter) {
       const fileTools = reporter.request.ticket_id ? ['read', 'read_image', 'glob', 'grep'] : []
       // DSH restrictions mask inherited global tools only. Reporter tools are registered in this Agent scope and remain
@@ -345,19 +570,6 @@ export class Sessions {
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
       this.bindShell(agent, ticket!.id, binding)
     }
-  }
-  /**
-   * Whether a Session runs the router preset: as DSH's preset registry last selected it, read through the session projection
-   * on a DSH whose registry has no `presetForSession`, else as it was created; `standard`, the safer caps, when unreadable.
-   */
-  private routed(agent: Agent): boolean {
-    try {
-      const presets = this.ctx.get('agentPresets') as { presetForSession?: (session: Agent['session']) => string | null } | undefined
-      const projections = this.ctx.get('sessionProjections') as { stateOf?: (session: Agent['session'], key: string) => unknown } | undefined
-      const selected = typeof presets?.presetForSession === 'function' ? presets.presetForSession(agent.session)
-        : projections?.stateOf?.(agent.session, 'agentPreset')
-      return (selected ?? agent.session.header.agentPreset) === ROUTER_PRESET
-    } catch { return false }
   }
   /**
    * An Executor Session's tools: only the profile's work tools, which DSH requires to be known, and none once its ticket
@@ -446,4 +658,6 @@ export class Sessions {
   }
   /** Releases prompt sections, skills, and tools registered by `Sessions` across all decorated agents. */
   dispose(): void { for (const agent of [...this.bindings.keys()]) this.release(agent) }
+  /** Waits for Session creates already in flight before Runtime snapshots agents for shutdown cancellation. */
+  async settleProjectOrchestratorEnsures(): Promise<void> { await Promise.allSettled([...this.projectSessionEnsures.values()]) }
 }

@@ -37,7 +37,7 @@ export interface HttpHost {
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
-  readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
+  readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'projectOrchestrators'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'> & Partial<Pick<Settings, 'createProject'>>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
@@ -115,7 +115,7 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, project_orchestrators: runtime.sessions.projectOrchestrators(), paused: settings.paused, health: runtime.health }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -173,7 +173,8 @@ function routes(runtime: HttpHost): Routes {
       if (!runtime.settings.createProject) throw new RouteError(404, 'Project management unavailable')
       return runtime.settings.createProject(input.provider, input.config, input.enabled)
     },
-    'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
+    'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir,
+      runtime.sessions.projectOrchestrators()),
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
     'GET threads': ({ query }) => {
       const { filter, offset, limit } = ThreadsQuery.parse(query)
