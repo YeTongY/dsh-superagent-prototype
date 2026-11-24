@@ -344,6 +344,7 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/app/cache.ts` | `TextCache`：将文本缓存在有容量上限的内存中，优先淘汰最近最少使用的内容。 |
 | `src/app/settings.ts` | Settings。 |
 | `src/app/settings-history.ts` | `policyHistory`：为每个已保存的设置 revision 记录相对前一版本的变更。 |
+| `src/app/project-scope.ts` | 项目归属解析，供编排工具、资源视图和候选卡片使用。 |
 | `src/app/prompts.ts` | Prompts、`builtInParts`（团队可覆盖的内置部分）和 `promptParts`（角色 Prompt 各部分的顺序）。 |
 | `src/app/context.ts` | 从 `prompts/` 读取的内置 Prompt 文本，以及 Session 读取的 transcript 条目。 |
 | `src/app/skill-files.ts` | 打包文本：`promptFile` 会将文件中每行一句的内容合并为段落；此处还包含随包发布的 Skill。 |
