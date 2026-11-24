@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { projectOrchestratorSessionId } from '../src/app/sessions.ts'
+import { statSync } from 'node:fs'
+import { projectOrchestratorSessionId, projectOrchestratorWorkspace } from '../src/app/sessions.ts'
 import { key } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { KV } from '../src/kv.ts'
@@ -36,6 +37,10 @@ afterEach(async () => { await host?.stop(); host = undefined })
 it('routes repositories and their Feishu groups to independent project sessions and replies in the original topic', async () => {
   host = await startRuntime(store => store.set(KV.runtime.masterId, 'orchestrator-legacy'), configure)
   const { runtime } = host
+  for (const project of projects) {
+    expect(host.agents.get(project.sessionId)).toBeDefined()
+    expect(statSync(projectOrchestratorWorkspace(host.directory, project.id)).isDirectory()).toBe(true)
+  }
   expect(await host.api('GET', 'state')).toMatchObject({ body: { project_orchestrators: expect.arrayContaining(projects.map(project =>
     expect.objectContaining({ project_source_id: project.id, session_id: project.sessionId, repository: project.repository, ready: true }))) } })
   const chatOne = feishu('11', '请看看仓库一', { chat_id: one.chatId })

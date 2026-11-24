@@ -6,6 +6,7 @@ import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
@@ -230,7 +231,8 @@ export class Sessions {
     }
     const pending = this.projectSessionEnsures.get(projectId)
     if (pending) return pending
-    const ensure = this.ensureWithModel(id, projectOrchestratorWorkspace(stateDir, projectId), title, 'orchestrator')
+    const workspace = projectOrchestratorWorkspace(stateDir, projectId)
+    const ensure = this.ensureWithModel(id, workspace, title, 'orchestrator')
       .then(agent => { this.projectSessionFailures.delete(projectId); return agent })
       .catch(error => {
         const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
@@ -262,6 +264,8 @@ export class Sessions {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
+      // DSH registers an existing directory. Project orchestrators own their workspace under stateDir.
+      if (role === 'orchestrator' && this.host.projectIdForSession(id)) await mkdir(cwd, { recursive: true, mode: 0o700 })
       const workspace = await ctx.workspaceRegistry.create(cwd)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
