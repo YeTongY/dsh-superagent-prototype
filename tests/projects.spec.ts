@@ -72,6 +72,28 @@ describe('项目身份与边界', () => {
     expect(runtimeHost.runtime.store.settings().sources[id]).toMatchObject({ kind: 'gitlab', enabled: true,
       config: { host: 'gitlab.com', repository: 'team/app' } })
   })
+  it('固定 github/gitlab Source ID 只允许从空配置初始化，换仓库必须使用新的 ProjectSource ID', () => {
+    let current = SettingsSchema.parse({ sources: {
+      github: { enabled: true, config: { repository: '' } },
+      gitlab: { enabled: true, config: { repository: '', host: 'gitlab.com' } },
+    } })
+    const sources = new SourceRegistry(() => current)
+    sources.register(githubKind); sources.register(gitlabKind)
+    for (const item of [
+      { provider: 'github' as const, original: { repository: 'acme/one' }, replacement: { repository: 'acme/two' } },
+      { provider: 'gitlab' as const, original: { host: 'gitlab.internal', repository: 'team/one' }, replacement: { host: 'gitlab.internal', repository: 'team/two' } },
+    ]) {
+      const first = sources.validate(item.provider, { enabled: true, config: item.original })
+      current = SettingsSchema.parse({ ...current, sources: { ...current.sources, [item.provider]: first } })
+      expect(() => sources.validate(item.provider, { enabled: true, config: item.replacement }))
+        .toThrow('不能在固定 Source ID 下替换项目身份')
+
+      const nextId = projectSourceId(item.provider, String(item.replacement.host ?? (item.provider === 'github' ? 'github.com' : 'gitlab.com')),
+        String(item.replacement.repository))
+      expect(sources.validate(nextId, { kind: item.provider, enabled: true, config: item.replacement }))
+        .toMatchObject({ kind: item.provider, enabled: true, config: item.replacement })
+    }
+  })
   it('同编号 Issue 经过正常 Engine 后分别创建 Thread 和 Ticket，重复事件只在本项目去重', () => {
     const h = harness(), [first, second] = h.ids as [string, string]
     const trigger = issueTrigger(issue(), 'agent-bot')

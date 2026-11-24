@@ -6,6 +6,15 @@ import { AdmissionTableSchema, type Settings } from '../policy.ts'
 import { projectSourceId } from '../project-source.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
+/** Resolve the immutable repository identity stored behind a compatibility Source alias. */
+function configuredIdentity(provider: 'github' | 'gitlab', config: Record<string, unknown>): string | undefined {
+  const repository = typeof config.repository === 'string' ? config.repository : ''
+  if (!repository.trim()) return undefined
+  const fallbackHost = provider === 'github' ? 'github.com' : 'gitlab.com'
+  const host = typeof config.host === 'string' && config.host.trim() ? config.host : fallbackHost
+  try { return projectSourceId(provider, host, repository) }
+  catch { throw new Error(`无法验证固定 Source ID ${provider} 当前绑定的项目身份`) }
+}
 
 /**
  * Manages registered SourceKind plugins, validates their instance and policy configurations, and implements SourceScope for the Engine.
@@ -74,6 +83,13 @@ export class SourceRegistry implements SourceScope {
     const config = kind.schema.parse(value.config)
     const existing = this.settings().sources[id]
     if (existing && (existing.kind ?? id) !== kind.kind) throw new Error('不能修改现有 Source 的 Provider')
+    if (existing && id === kind.kind && (kind.kind === 'github' || kind.kind === 'gitlab')) {
+      const previous = configuredIdentity(kind.kind, existing.config)
+      const next = configuredIdentity(kind.kind, config)
+      if (previous && previous !== next) {
+        throw new Error('不能在固定 Source ID 下替换项目身份；请通过项目 API 创建新的 ProjectSource')
+      }
+    }
     if (id !== kind.kind && (kind.kind === 'github' || kind.kind === 'gitlab')) {
       const expected = projectSourceId(kind.kind, String(config.host ?? (kind.kind === 'github' ? 'github.com' : '')), String(config.repository ?? ''))
       if (id !== expected) throw new Error('项目身份与配置不一致；请创建新的 ProjectSource')
