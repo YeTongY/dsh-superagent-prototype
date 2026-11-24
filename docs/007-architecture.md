@@ -493,7 +493,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | compose.yaml | host 网络、持久化 bind 目录和 Runtime 健康检查 |
 | docker/entrypoint.sh | 初始化缺失的 profile、验证 CLI/profile，并提供启动、状态与健康命令 |
 | docker/profile.patch.yml | 将 Web 与 Reporter 绑定 127.0.0.1，并选择持久化 stateDir |
-| docs/011-docker-bootstrap.md | 911pro 部署、fork 自举、模型配置、Reporter 与运维流程 |
+| docs/011-docker-bootstrap.md | Docker 部署、fork 自举、模型配置、Reporter 与运维流程 |
 
 ## 持久化
 

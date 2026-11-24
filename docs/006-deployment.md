@@ -110,7 +110,7 @@ bundle 为 Executor 定义了 `dsh-superagent-worker`，为主 Session 定义了
 
 `config.json` 与 Linux 加密凭据、主密钥分别位于上述两个目录，升级或恢复时应一起保留。CLI 以文件方式存储密钥，不依赖桌面 keyring 或 D-Bus。文件权限由 CLI 限制为目录 `0700`、密钥和密文文件 `0600`；加密主密钥与密文在同一数据卷中，数据目录仍须使用宿主访问控制和受保护备份。
 
-在 911pro 的部署目录中创建持久 wrapper；此命令在容器默认的非 root 用户下执行，且不写入任何应用凭据：
+在宿主机的发布目录中创建持久 wrapper。命令使用容器默认的非 root 用户，应用凭据由后续的交互步骤配置。
 
 ```sh
 docker compose exec -T superagent sh -c 'cat > /data/lark/lark-bot && chmod 0700 /data/lark/lark-bot' <<'EOF'
