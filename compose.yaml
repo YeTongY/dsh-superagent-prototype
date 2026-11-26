@@ -1,6 +1,6 @@
 services:
   superagent:
-    image: dsh-superagent:local
+    image: ${DSH_SUPERAGENT_IMAGE:-dsh-superagent:local}
     build:
       context: .
       dockerfile: Dockerfile

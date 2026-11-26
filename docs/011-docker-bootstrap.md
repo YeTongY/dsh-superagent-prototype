@@ -191,6 +191,64 @@ docker compose exec superagent /usr/local/bin/dsh-superagent-entrypoint status
 
 如只需停止服务，运行 `docker compose down`；数据仍保留在宿主目录中。不要执行 `docker compose down -v`，也不要删除 `/data`。从备份恢复时保持属主 1000:1000；容器不会覆盖现有 DSH profile。
 
+## 自动拉取 GHCR 镜像并安全更新
+
+### 方案调研与取舍
+
+对比了社区常用的容器自动更新方案与宿主机受控脚本：
+
+- `containrrr/watchtower` 已归档停止维护，在较新 Docker Engine API 下存在兼容问题；社区维护分支 `nickfedor/watchtower` 可作为替代，但这类通用工具会在容器内部直接重建，无法感知 `dsh-superagent` 是否仍有 Worker 在执行，也不能在停机窗口对宿主 `/data` 做一致性 tar 备份并在 SQLite 迁移/健康检查失败时恢复数据。
+- `crazymax/diun` 仅负责发现镜像摘要更新并发出通知，实际停机备份与重建仍需宿主侧命令完成。
+- 因此本仓库采用显式开启的宿主机脚本 [docker-auto-update](../scripts/docker-auto-update)，配合 [compose.yaml](../compose.yaml) 的 `DSH_SUPERAGENT_IMAGE` 参数运行；容器本身保持非 root、不挂载 `docker.sock`。
+
+### 一次性准备
+
+1. 在宿主机使用具备 GHCR `read:packages` 权限的账号登录，并将 GHCR 配置保存在部署目录或操作者账号下：
+
+```sh
+docker login ghcr.io
+```
+
+2. 准备好受控的环境变量文件（如 `$DEPLOY_ROOT/shared/update.env`，不要提交到 Git），指定镜像标签与数据目录：
+
+```sh
+DSH_SUPERAGENT_IMAGE=ghcr.io/owner/dsh-superagent-prototype:edge
+DSH_SUPERAGENT_DATA_DIR=/srv/superagent-deploy/shared/data
+```
+
+### 手动检查与更新
+
+```sh
+# 仅拉取远端镜像清单并比对本地运行中的镜像 ID、Worker 负载，不停止容器
+DSH_SUPERAGENT_IMAGE=ghcr.io/owner/dsh-superagent-prototype:edge \
+  python3 scripts/docker-auto-update check
+
+# 仅在镜像有变化且当前没有运行中的 Worker（load.running == 0）时更新
+DSH_SUPERAGENT_IMAGE=ghcr.io/owner/dsh-superagent-prototype:edge \
+  DSH_SUPERAGENT_DATA_DIR="$DEPLOY_ROOT/shared/data" \
+  python3 scripts/docker-auto-update update
+```
+
+脚本执行顺序：加单实例文件锁 → `docker pull` → 比对容器当前运行镜像 ID → 如有运行中的 Worker 则返回 `deferred` 延后更新（可用 `--force` 跳过）→ 为当前镜像打 `dsh-superagent:rollback-<timestamp>` 标签 → `docker compose down` 正常停机 → 将数据目录备份为 `backups/data-auto-<timestamp>.tar.gz` → `docker compose up -d --no-build` → 轮询回环 `/orchestrator/api/state` 直到 `ready`/`paused`。若新容器超时或未就绪，自动停止新容器、恢复备份数据（原失败目录保留为 `*.failed-<timestamp>`）并切回回滚标签后以非零状态退出。
+
+每次 `check` 或 `update` 结束时，脚本还会向 `<data-dir>/superagent/update-status.json` 原子写入脱敏后的巡检摘要（不含宿主机文件路径或凭据）。Web 管理面板的「设置 › 高级与限制」（及 DSH 插件管理页）会读取该状态并展示当前构建版本，同时提供只读的「检查更新」按钮查询 GHCR/GitHub 是否有新版本，并在需要时提示对应的宿主机更新命令。
+
+### 宿主机定时任务（systemd / cron）
+
+仓库在 [dsh-superagent-update.service](../examples/systemd/dsh-superagent-update.service) 和 [dsh-superagent-update.timer](../examples/systemd/dsh-superagent-update.timer) 提供了可直接改写路径的 systemd 模板：
+
+```sh
+sudo cp examples/systemd/dsh-superagent-update.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dsh-superagent-update.timer
+```
+
+若使用用户级 cron（每 15 分钟检查一次，日志写入部署目录外）：
+
+```cron
+*/15 * * * * cd /srv/superagent-deploy/release && . /srv/superagent-deploy/shared/update.env && /usr/bin/python3 /srv/superagent-deploy/release/scripts/docker-auto-update update >> /srv/superagent-deploy/shared/update.log 2>&1
+```
+
 | 现象 | 检查方法 |
 | --- | --- |
 | Compose 报数据目录缺失 | 确认 DSH_SUPERAGENT_DATA_DIR 是存在的绝对路径；Compose 禁止悄悄创建 root 属主目录。 |

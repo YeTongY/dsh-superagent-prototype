@@ -5,6 +5,7 @@ import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
 import type { OverviewView } from './views/overview.ts'
 import type { SettingsView } from './views/settings.ts'
+import type { UpdateCheckResult, UpdateStatusView } from './update.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
@@ -59,6 +60,8 @@ export interface Api {
   'GET policy/history': { response: HistoryView }
   'POST policy-sync/:id': { response: { policy: unknown } }
   'POST setup/check': { response: { restarting: true } }
+  'GET update': { response: UpdateStatusView }
+  'POST update/check': { body: { image?: string }; response: UpdateCheckResult }
   'GET models': { response: ModelCatalog }
   'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }

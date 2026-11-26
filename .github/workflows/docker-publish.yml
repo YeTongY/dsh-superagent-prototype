@@ -65,5 +65,9 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           annotations: ${{ steps.metadata.outputs.annotations }}
+          build-args: |
+            APP_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ fromJSON(steps.metadata.outputs.json).labels['org.opencontainers.image.created'] }}
+            APP_IMAGE=${{ fromJSON(steps.metadata.outputs.json).tags[0] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

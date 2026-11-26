@@ -19,6 +19,9 @@ ARG GH_VERSION=2.104.0
 ARG GLAB_VERSION=1.130.0
 ARG LARK_CLI_VERSION=1.0.90
 ARG REPORTER_BROWSER=0
+ARG APP_COMMIT=""
+ARG BUILD_TIME=""
+ARG APP_IMAGE=""
 
 # The release hashes were checked against official release metadata, including the lark-cli npm checksums.
 ARG GH_AMD64_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
@@ -70,6 +73,9 @@ ENV DSH_HOME=/data/dsh \
     LARKSUITE_CLI_CONFIG_DIR=/data/lark/config \
     LARKSUITE_CLI_DATA_DIR=/data/lark/data \
     DSH_SUPERAGENT_REPORTER_BROWSER=${REPORTER_BROWSER} \
+    DSH_SUPERAGENT_COMMIT=${APP_COMMIT} \
+    DSH_SUPERAGENT_BUILD_TIME=${BUILD_TIME} \
+    DSH_SUPERAGENT_IMAGE=${APP_IMAGE} \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_ENV=production
 

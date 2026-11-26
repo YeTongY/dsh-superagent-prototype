@@ -364,6 +364,7 @@ Policy 版本变更时，会计算 `policyEffects`，记录已收到通知的 Ti
 | `src/app/tools/main.ts` | 主 Session 工具。 |
 | `src/app/tools/executor.ts` | Executor Session 工具。 |
 | `src/app/http.ts` | `/orchestrator/api` 路由：同源检查、请求限制，以及按失败类型返回对应状态码。 |
+| `src/app/update.ts` | 只读版本元数据读取、宿主机 `update-status.json` 解析与受限 GHCR 镜像更新检查。 |
 | `src/app/api.ts` | `Api`：定义每个路由的参数、query、body 和响应，以及列表筛选器。此文件只导入类型，因此可以打包到管理面板中。 |
 | `src/app/views/text.ts` | 视图文本的两种形式：单行纯文本 `preview`，以及不含 HTML 的 `markdown`；还有 `plain` 和 `readable`。 |
 | `src/app/views/records.ts` | 视图共用的数据行：Trigger、Ticket、Thread、Decision 和 Channel 链接；以及 `ownersOf`，用于按请求读取后续消息的归属方。 |
@@ -461,6 +462,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | `tests/tools.spec.ts` | Session 工具：各角色通过 `orchestrator_read` 读取的内容，以及其他主 Session 工具的格式与校验。 |
 | `tests/runtime-concurrency.spec.ts` | 并发工作：pass 运行期间收到 Trigger，以及 delivery 和 launch 期间发生变化的 Ticket。 |
 | `tests/http.spec.ts` | 同源和 loopback 检查、各类失败的状态码、请求正文大小限制、路径参数和查询参数。 |
+| `tests/update-check.spec.ts` | 构建版本元数据、宿主机 `update-status.json` 解析、SSRF 防护与 GHCR 只读更新检查。 |
 | `tests/settings.spec.ts` | 与模型或账号检查并发的设置保存、被保存操作抢先完成的 Policy 同步，以及暂停、同步和 block 操作的拒绝情况。 |
 | `tests/views.spec.ts` | 管理视图从 Store 派生的数据，例如被丢弃消息所属的 Thread。 |
 | `tests/timeline.spec.ts` | Thread 分页和 Trigger 邻近消息按时间及 ID 排序的行为，确保所有已收到 Trigger 的时间格式一致。 |
@@ -471,6 +473,7 @@ GitHub、GitLab 与 Feishu Source 分别从 `./github-watch`、`./gitlab-watch` 
 | `tests/model-surface.spec.ts` | 检查模型可读取的所有内容：工具、Prompt、Skill 和 Input；并对照工具 schema、执行环境、术语表及各角色的大小限制进行验证。 |
 | `tests/deployment.spec.ts`、`tests/environment.spec.ts`、`tests/index.spec.ts` | 插件配置和 Setup、Agent 进程环境及插件入口。 |
 | `tests/service-script.spec.ts` | 使用伪造的 `ps`、`tmux` 和 `dsh` 测试 `scripts/dsh-superagent`。 |
+| `tests/docker-auto-update.spec.ts` | 使用伪造的 `docker` CLI、临时备份目录和模拟 `/orchestrator/api/state` 服务测试 `scripts/docker-auto-update`。 |
 | `tests/client.spec.tsx`、`tests/navigation.spec.ts`、`tests/controls.spec.tsx` | 客户端插件的注册与轮询、Session 导航和路由状态、本地控件，以及管理面板的无循环导入结构。 |
 | `tests/panel-overview.spec.tsx`、`panel-source.spec.tsx`、`panel-trigger.spec.tsx`、`panel-eval.spec.tsx`、`panel-execution.spec.tsx` | 使用按路由响应的伪造管理 API 测试管理面板各页面。 |
 | `tests/panel-pagination.spec.tsx` | 评估、触发和执行列表跨服务端分页上限加载，轮询插入和删除后的前缀重建、筛选重置，以及后续页失败后的保留与恢复。 |
