@@ -1,5 +1,5 @@
 /** Eval status view (Decision log) and Rules & Access settings group (Auto-accept, Policy rules, and per-Source permissions). */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ADMISSION_DEFAULTS, ADMISSION_OPTIONS, type Admission, type AdmissionCell } from '../admission.ts'
 import type { AdmissionRowView } from '../sources/kind.ts'
 import { LIMITS } from '../limits.ts'
@@ -69,7 +69,7 @@ function RuleRow({ rule, expanded, onToggle, onChange, onDuplicate, onRemove }: 
 }
 
 type Part = Record<string, unknown>
-function SourcePart({ source, part, saved, dirty, onChange, reload }: {
+export function SourcePart({ source, part, saved, dirty, onChange, reload }: {
   source: SourceView; part: Part; saved: Part; dirty: boolean; onChange: (next: Part) => void; reload: () => Promise<void>
 }) {
   const { t, call, notify } = usePanel()
@@ -143,14 +143,15 @@ function AdmissionTable({ rows, labels, table, explicit, onChange }: {
   </Section>
 }
 
-function PolicyBlock() {
+function PolicyBlock({ focus }: { focus?: string }) {
   const { t } = usePanel()
   const { settings: { blocks, sources, policyVersion }, reload } = useSettings()
   const draft = useBlockDraft('policy', blocks.policy.value, blocks.policy.revision)
   const policy = draft.value
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const parts = sources.filter(source => source.installed && source.policy)
-  const [tab, setTab] = useState<string>()
+  const [tab, setTab] = useState<string | undefined>(focus)
+  useEffect(() => { if (focus) setTab(focus) }, [focus])
   const current = parts.find(source => source.id === tab) ?? parts[0]
   const edit = (next: Partial<typeof policy>) => draft.edit({ ...policy, ...next })
   const toggle = (id: string) => { const next = new Set(expanded); if (next.has(id)) next.delete(id); else next.add(id); setExpanded(next) }
@@ -232,12 +233,12 @@ function EvalBlock() {
   </form>
 }
 
-export function EvalSettings({ version }: { version?: string | undefined }) {
+export function EvalSettings({ version, source }: { version?: string | undefined; source?: string | undefined }) {
   const { t } = usePanel()
   return <div className="dt-form">
     {version && <p className="dt-banner">{t('policyFocusBanner', { version: version.slice(0, 8) })}</p>}
     <EvalBlock />
-    <PolicyBlock />
+    <PolicyBlock focus={source} />
     <ConfigHistory blocks={['policy', 'eval']} versions {...version ? { focus: version } : {}} />
   </div>
 }

@@ -108,7 +108,11 @@ function OrchestratorSessions({ projects, masterId }: { projects?: ProjectOrches
   if (!projects.length) return null
   const canOpen = ({ enabled, ready, status }: ProjectOrchestrators[number]) => enabled && ready && (status === 'idle' || status === 'running')
   const only = projects.length === 1 ? projects[0] : undefined
-  if (only && canOpen(only)) return <span title={t('openOrchestratorHint')}><SessionButton variant="outline" sessionId={only.session_id} label={t('openProjectSession')} /></span>
+  if (only && canOpen(only)) {
+    const repo = only.host && only.host !== 'github.com' ? `${only.host}/${only.repository}` : only.repository
+    return <span title={t('openOrchestratorHint')}><SessionButton variant="outline" sessionId={only.session_id}
+      label={t('openProjectSessionNamed', { repo })} /></span>
+  }
   return <>
     <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} aria-haspopup="dialog" aria-expanded={open}
       onClick={() => setOpen(true)}>{t('projectSessions')}</Button>
