@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { THREAD_FILTERS, type ThreadFilter } from '../app/api.ts'
 import { loadList, usePoll } from './api.ts'
-import { Pill } from './controls.tsx'
+import { Button, Pill } from './controls.tsx'
 import { usePanel } from './provider.tsx'
 import { ThreadLine } from './rows.tsx'
 import { Hint, LoadMore, LoadState, StatusHead } from './widgets.tsx'
@@ -14,14 +14,17 @@ export function TriggerStatus({ filter }: { filter: ThreadFilter }) {
   const go = (next: ThreadFilter) => { setLimit(20); navigate({ page: 'trigger', query: next !== 'subscribed' ? { filter: next } : {} },
     true) }
   return <>
-    <StatusHead hint={t('triggerIntro')} />
+    <StatusHead hint={t('triggerIntro')} page="trigger" />
     <div className="dt-filters">
       {THREAD_FILTERS.map(value => <Pill key={value} active={filter === value}
         onClick={() => go(value)}>{t(`threadFilter.${value}`)}</Pill>)}
     </div>
     <LoadState error={error} loading={!data} />
     {data && (data.items.length ? <ul className="dt-list">{data.items.map(thread => <ThreadLine key={thread.key} thread={thread} />)}</ul>
-      : <Hint>{t('threadsNone')}</Hint>)}
+      : <div className="dt-empty-action">
+        <Hint>{t('threadsNone')}</Hint>
+        {filter === 'subscribed' && <Button variant="ghost" size="sm" onClick={() => go('all')}>{t('viewAllThreads')}</Button>}
+      </div>)}
     {data?.next_offset != null && <LoadMore onMore={() => setLimit(limit + 20)} />}
   </>
 }

@@ -15,7 +15,7 @@ it('names the same placeholders in both languages', () => {
 it('words a reason by its code with its values, each of a batch, and words a person or an assessor wrote as written', () => {
   const t = ((key: DshSuperagentKey, values: Record<string, string> = {}) => (zh[key] ?? key).replace(/\{(\w+)\}/g, (_match, name: string) => values[name] ?? '')) as T
   expect(reasonLabel(t, 'retried')).toBe(zh['reason.retried'])
-  expect(reasonLabel(t, [{ code: 'routed', values: { ticket: 't1' } }])).toBe('已转给工单 t1')
+  expect(reasonLabel(t, [{ code: 'routed', values: { ticket: 't1' } }])).toBe('已转交工单 t1')
   expect(reasonLabel(t, [{ code: 'not_a_member', triggerId: '1' }, { code: 'no_mention', triggerId: '2' }]))
     .toBe(`${zh['reason.not_a_member']}；${zh['reason.no_mention']}`)
   expect(reasonLabel(t, [{ code: 'said', values: { text: 'The button is already blue' } }])).toBe('The button is already blue')

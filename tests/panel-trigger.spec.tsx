@@ -11,11 +11,11 @@ it('walks a Thread timeline newest first with dispositions as tags and its Decis
   await mount()
   await click(zh['tab.trigger'])
   expect(document.querySelector('.dt-ticket .dt-stage')?.textContent).toBe(zh.threadSubscribed)
-  expect(text()).toContain('扇出给 修复回归')
+  expect(text()).toContain('同步给 修复回归')
   await click('这个文案好奇怪')
-  expect(document.querySelector('.dt-page-head .dt-btn')?.textContent).toBe(zh['term.trigger'])
-  expect(text()).not.toContain('扇出到 1 个工单')
-  expect(text()).toContain('已过滤：发送者不在这个来源的名单里')
+  expect(document.querySelector('.dt-page-head .dt-btn')?.textContent).toBe(zh['tab.trigger'])
+  expect(text()).not.toContain('已同步到 1 个工单')
+  expect(text()).toContain('已过滤：发送者不在白名单中')
   expect(text()).toContain(zh['term.correlation'])
   expect(all('.dt-event .dt-event-text').map(element => element.textContent)).toEqual(['message e4', 'message e3'])
   await click(zh.requeue)
@@ -85,14 +85,14 @@ it('shows a follow-up delivered to its Ticket without an Eval, a hand-back with 
   await mount()
   const events = () => all('.dt-event').map(event => [event.querySelector('.dt-event-text')?.textContent,
     [...event.querySelectorAll('.dt-tag')].map(tag => tag.textContent), event.querySelector('.dt-hint')?.textContent])
-  expect(events()).toEqual([['message f2', [zh.dispositionQueued], '“修复回归”的执行器把这条触发交回评估：Asks for a new page'],
+  expect(events()).toEqual([['message f2', [zh.dispositionQueued], '「修复回归」的执行器将此消息交回重新判断：Asks for a new page'],
     ['message f1', [zh.dispositionDelivered], undefined]])
   expect(document.querySelector(`.dt-tag[title="${zh.dispositionDeliveredHint}"]`)).not.toBeNull()
   expect(all('.dt-list .dt-ticket').map(row => [row.querySelector('.dt-open')?.textContent, row.querySelector('.dt-tag')?.textContent]))
     .toEqual([['修复回归', undefined], ['相关工单', zh.contextOnly]])
   await remount(en)
   expect(events()[1]).toEqual(['message f1', [en.dispositionDelivered], undefined])
-  expect(events()[0]![2]).toBe('The Executor of “修复回归” handed it back for an Eval: Asks for a new page')
+  expect(events()[0]![2]).toBe('Runner of “修复回归” handed this message back: Asks for a new page')
 })
 
 /** Simulate a Thread with `count` Triggers 1 minute apart, paged 50 at a time via `before` or `around` cursors. */
@@ -141,4 +141,22 @@ it('shows a link\'s target far back with every Trigger after it', async () => {
   expect(shown()).toEqual(range(0, 119))
   expect(document.querySelector('.dt-highlight .dt-event-text')?.textContent).toBe('message m10')
   expect(all('button').some(button => button.textContent === zh.loadEarlier)).toBe(false)
+})
+
+it('resolves hashed project source IDs to repository names and formats Feishu template messages', async () => {
+  server.projectOrchestrators = [{ project_source_id: 'github-0123456789abcdef01234567', repository: 'acme/widgets',
+    host: 'github.com', session_id: 'router-1', status: 'idle', enabled: true, ready: true }]
+  server.threads = [
+    threadSummary({ key: 'github-0123456789abcdef01234567:5', source: 'github-0123456789abcdef01234567', title: '#5 Fix bug',
+      facts: { number: { value: '#5' } } }),
+    threadSummary({ key: 'feishu:oc_1:om_tpl', source: 'feishu',
+      title: 'template: {from_user} invited {to_chatters}\nfrom_user: Alice\nto_chatters: Bob\ndivider_text:',
+      latest: { actor: { source: 'feishu', id: '' }, human: false, at: '2026-09-23T00:00:00Z',
+        preview: 'template: {from_user} invited {to_chatters}\nfrom_user: Alice\nto_chatters: Bob' } }),
+  ]
+  await mount()
+  await click(zh['tab.trigger'])
+  expect(all('.dt-chip-source').map(chip => chip.textContent)).toContain('acme/widgets')
+  expect(text()).toContain('Alice invited Bob')
+  expect(text()).not.toContain('divider_text')
 })

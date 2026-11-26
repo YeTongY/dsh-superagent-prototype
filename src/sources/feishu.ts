@@ -181,47 +181,56 @@ export function feishuProjectForTrigger(trigger: Trigger, deployment: Deployment
 
 const projectChoices = (deployment: Deployment | undefined, chats: readonly FeishuProjectChat[]) => {
   const choices = new Map<string, Localized>()
-  for (const [id, project] of Object.entries(deployment?.projects ?? {})) {
-    const value = `${project.provider}:${project.host}/${project.project} (${id})`
+  const entries = Object.entries(deployment?.projects ?? {})
+  const counts = new Map<string, number>()
+  for (const [, project] of entries) {
+    const key = `${project.provider}:${project.host}/${project.project}`
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  for (const [id, project] of entries) {
+    const key = `${project.provider}:${project.host}/${project.project}`
+    const hostSuffix = project.provider === 'gitlab' ? project.host : 'GitHub'
+    const base = `${project.project} (${hostSuffix})`
+    const value = (counts.get(key) ?? 0) > 1 ? `${base} · ${id.slice(0, 12)}` : base
     choices.set(id, { zh: value, en: value })
   }
   for (const id of Object.keys(deployment?.projectProblems ?? {})) {
-    if (!choices.has(id)) choices.set(id, { zh: `${id}（项目未就绪）`, en: `${id} (project not ready)` })
+    if (!choices.has(id)) choices.set(id, { zh: `${id}（未就绪）`, en: `${id} (not ready)` })
   }
   if (deployment && deployment.projects === undefined && !Object.keys(deployment.projectProblems ?? {}).length && deployment.repository) {
-    const value = `github.com/${deployment.repository} (github)`
+    const value = `${deployment.repository} (GitHub)`
     choices.set('github', { zh: value, en: value })
   }
   for (const chat of chats) if (chat.projectSourceId && !choices.has(chat.projectSourceId)) {
     choices.set(chat.projectSourceId, { zh: `${chat.projectSourceId}（未知或未就绪）`, en: `${chat.projectSourceId} (unknown or not ready)` })
   }
-  return [{ value: '', label: { zh: '选择仓库', en: 'Select a project' } }, ...[...choices]
+  return [{ value: '', label: { zh: '选择关联仓库', en: 'Select repository' } }, ...[...choices]
     .sort(([a], [b]) => a.localeCompare(b)).map(([value, label]) => ({ value, label }))]
 }
 export const feishuKind: SourceKind<FeishuConfig> = {
   kind: SOURCE,
   refreshLabels: (host, signal) => refreshChatNames(sourceContext(host, feishuKind), signal),
   title: { zh: '飞书', en: 'Feishu' },
-  description: { zh: '接收下列群和私聊中发给机器人的消息，补收群历史并轮询订阅的线程。', en: 'Receives messages to the bot in these chats and direct messages, recovers chat history and polls subscribed Threads.' },
+  description: { zh: '接收绑定飞书群及私聊中发给机器人的消息，并在关联对话收到新消息时自动跟踪。', en: 'Receives messages to the bot in bound Feishu chats and direct messages, and tracks updates in subscribed conversations.' },
   schema: FeishuConfigSchema,
   fields: [
-    { key: 'cli', type: 'text', label: { zh: '机器人的 lark-cli', en: 'Bot lark-cli' },
-      hint: { zh: '命令名或绝对路径，指向只允许机器人身份（strict mode bot）的 lark-cli 配置；执行器以 lark-cli 调用它。保存时读取应用和机器人，然后重启 dsh-superagent。', en: 'A command name or absolute path of a lark-cli configuration that allows only the bot identity (strict mode bot); the Executor calls it as lark-cli. Saving reads the app and the bot, then restarts dsh-superagent.' } },
-    { key: 'chats', type: 'rows', label: { zh: '接收的群', en: 'Chats' },
-      hint: { zh: '每个群必须绑定一个已就绪仓库，仓库和群均只能绑定一次。未绑定、未知或未就绪的群不会进入编排会话。“仅 @”只接收 @ 机器人的消息和已有工单的线程；“全部消息”也接收其余消息。',
-        en: 'Bind each chat to one ready project; each project and chat can be bound only once. Unbound, unknown or unready chats do not enter an orchestrator session. "@ only" receives mentions and subscribed Threads; "All" also receives the rest.' },
+    { key: 'cli', type: 'text', label: { zh: '机器人 lark-cli 路径', en: 'Bot lark-cli' },
+      hint: { zh: '命令名或绝对路径，需指向仅使用机器人身份（strict mode bot）的 lark-cli 配置；执行器会通过 lark-cli 调用它。保存时会校验机器人并重启服务。', en: 'A command name or absolute path of a strict-mode bot lark-cli config; the runner calls it as lark-cli. Saving checks the bot and restarts the service.' } },
+    { key: 'chats', type: 'rows', label: { zh: '监听的飞书群', en: 'Feishu chats' },
+      hint: { zh: '每个群需绑定一个已就绪的代码仓库（每个仓库与群只能一对一绑定）。「仅 @」只接收 @ 机器人的消息和已有工单的后续回复；「全部消息」会接收群内所有消息供 AI 判断。',
+        en: 'Bind each chat to one ready repository (one-to-one). "@ only" receives @ mentions and follow-ups on existing Tickets; "All" also passes unmentioned messages for AI assessment.' },
       columns: [
-        { key: 'chatId', type: 'text', label: { zh: '群', en: 'Chat' }, pattern: 'oc_[a-zA-Z0-9]+', choose: { zh: '选择机器人已加入的群', en: 'Choose a chat the bot has joined' }, refresh: { zh: '刷新群列表', en: 'Refresh chats' } },
-        { key: 'projectSourceId', type: 'select', label: { zh: '仓库', en: 'Project' }, options: [{ value: '', label: { zh: '选择仓库', en: 'Select a project' } }] },
-        { key: 'listen', type: 'select', label: { zh: '接收', en: 'Receive' }, options: [{ value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
+        { key: 'chatId', type: 'text', label: { zh: '群聊', en: 'Chat' }, pattern: 'oc_[a-zA-Z0-9]+', choose: { zh: '选择机器人已加入的群', en: 'Choose a chat the bot has joined' }, refresh: { zh: '刷新群列表', en: 'Refresh chats' } },
+        { key: 'projectSourceId', type: 'select', label: { zh: '绑定仓库', en: 'Repository' }, options: [{ value: '', label: { zh: '选择关联仓库', en: 'Select repository' } }] },
+        { key: 'listen', type: 'select', label: { zh: '接收范围', en: 'Receive' }, options: [{ value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
       ] },
-    { key: 'otherChats', type: 'select', label: { zh: '其他群（旧版设置）', en: 'Other chats (legacy)' }, options: [{ value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
-      hint: { zh: '项目编排仅接收已绑定群的消息。此旧版选项适用于仍使用旧路由的部署。', en: 'Project orchestration receives messages from bound groups. This setting applies to deployments using the legacy routing.' } },
-    { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' },
-      hint: { zh: '仅有一个可用项目时，私聊消息进入该项目会话。', en: 'Direct messages can reach a project session when exactly one project is configured and ready.' } },
-    { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取线程和群历史时，每页的消息数。', en: 'Messages per page when agents read Threads and chat history.' } },
-    { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '原消息链接的查询时限 / 毫秒', en: 'Original message link time limit / ms' },
-      hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
+    { key: 'otherChats', type: 'select', label: { zh: '其他群（旧版兼容）', en: 'Other chats (legacy)' }, options: [{ value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
+      hint: { zh: '多仓库模式下只接收上方已绑定的群；此旧版选项仅对未启用多仓库的旧配置生效。', en: 'Multi-repo setups only listen to bound chats above; this legacy option applies only to old single-repo deployments.' } },
+    { key: 'directMessages', type: 'switch', label: { zh: '接收机器人私聊', en: 'Direct messages' },
+      hint: { zh: '仅当只有一个可用代码仓库时，私聊机器人的消息才会进入该仓库的编排会话。', en: 'Direct messages reach an orchestrator session only when exactly one repository is configured and ready.' } },
+    { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每次读取消息条数', en: 'Messages per page' }, hint: { zh: '读取对话上下文和群历史记录时，每次拉取的消息数。', en: 'Messages per page when agents read conversation context and chat history.' } },
+    { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '获取消息链接超时 / 毫秒', en: 'Message link timeout / ms' },
+      hint: { zh: '查询原消息链接的最大等待时间；超时后将直接读取消息正文。', en: 'How long to wait for an original message link before reading the message directly.' } },
   ],
   fieldsFor(deployment, config) {
     const options = projectChoices(deployment, config.chats)
@@ -257,16 +266,16 @@ export const feishuKind: SourceKind<FeishuConfig> = {
         .refine(bots => new Set(bots.map(bot => bot.id)).size === bots.length, 'Duplicate bot ids').optional(),
     }).strict(),
     fields: [
-      { key: 'allowed', type: 'rows', label: { zh: '能发起工作的飞书用户', en: 'Feishu users who may originate work' },
-        columns: [{ key: 'id', type: 'text', label: { zh: 'open_id', en: 'open_id' }, pattern: 'ou_[a-zA-Z0-9]+' }, { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
-      { key: 'syncChat', type: 'text', pattern: '(oc_[a-zA-Z0-9]+)?', label: { zh: '同步来源群', en: 'Sync chat' }, choose: { zh: '不同步', en: 'Do not sync' },
-        hint: { zh: '同步时，名单变成这个群里的人：新成员加入，离开的人移除，名字取群里的名字。启动时和点同步时进行。', en: 'Syncing makes the list the people in this chat: new members join, people who left are removed, and names follow the chat. It runs at startup and on Sync.' } },
-      { key: 'bots', type: 'rows', label: { zh: '消息可以成为候选的机器人', en: 'Bots whose messages may become candidates' },
-        hint: { zh: '名单里的机器人在接收的群里发的消息成为推断的候选，交给评估；它们不能发起明确的请求，也不能停止工单。其他机器人的消息不接收。', en: 'Messages of a bot on this list, in chats the Source receives, become inferred candidates for an assessment; they never make an explicit request or stop a ticket. Other bots\' messages are not admitted.' },
+      { key: 'allowed', type: 'rows', label: { zh: '允许直接派活的飞书用户', en: 'Allowlisted Feishu users' },
+        columns: [{ key: 'id', type: 'text', label: { zh: 'open_id', en: 'open_id' }, pattern: 'ou_[a-zA-Z0-9]+' }, { key: 'name', type: 'text', label: { zh: '备注名', en: 'Name' }, optional: true }] },
+      { key: 'syncChat', type: 'text', pattern: '(oc_[a-zA-Z0-9]+)?', label: { zh: '自动同步群成员', en: 'Sync members from chat' }, choose: { zh: '不同步', en: 'Do not sync' },
+        hint: { zh: '开启同步后，上方白名单将自动与该群成员保持一致（启动时和点击同步时自动增删并更新姓名）。', en: 'Syncing keeps the allowlist identical to members of this chat at startup and on Sync.' } },
+      { key: 'bots', type: 'rows', label: { zh: '允许触发 AI 判断的机器人', en: 'Bots whose messages AI may assess' },
+        hint: { zh: '白名单中的机器人在监听群发消息时，会交给 AI 判断是否接单，但不能直接下指令或停止工单。', en: 'Messages from listed bots in listened chats are sent to AI assessment; they never directly start or stop a ticket.' },
         columns: [{ key: 'id', type: 'text', label: { zh: 'App ID 或 open_id', en: 'App ID or open_id' }, pattern: '(cli|ou)_[a-zA-Z0-9]+' },
-          { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
+          { key: 'name', type: 'text', label: { zh: '备注名', en: 'Name' }, optional: true }] },
     ],
-    explicit: { zh: '名单内的人 @ 机器人或私聊机器人，总是明确的请求，不需要配置。', en: 'Someone on the list who mentions the bot or messages it directly always makes an explicit request; that needs no setting.' },
+    explicit: { zh: '白名单成员在群里 @ 机器人或私聊机器人时，始终直接接单，无需额外配置。', en: 'An allowlisted user mentioning or messaging the bot directly always starts a Ticket directly.' },
     rows(stored) {
       const config = FeishuConfigSchema.parse(stored)
       const mentions = { zh: '仅 @', en: '@ only' }

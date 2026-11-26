@@ -14,7 +14,7 @@ import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, s
   type Tab } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
-import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
+import { actorName, errorText, reasonLabel, sourceLabel, type T, readableMarkers } from './text.ts'
 import { ThreadPage } from './thread.tsx'
 import { TicketPage } from './ticket.tsx'
 import { TriggerStatus } from './trigger.tsx'
@@ -68,7 +68,7 @@ function Result({ name, open, children }: { name: ReactNode; open: (() => void) 
 }
 function SearchResults({ result, query, onClose }: { result: SearchView; query: string; onClose: () => void }) {
   const { t, navigate } = usePanel()
-  const { setup } = usePanelData()
+  const { setup, state } = usePanelData()
   const empty = !result.items.length && !result.threads.length && !result.tickets.length
   const counts = { tickets: result.tickets.length, threads: result.threads.length, items: result.items.length }
   const go = (route: Route) => () => { onClose(); navigate(route) }
@@ -91,7 +91,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
       {result.items.map(item => <Result key={item.id} name={<Highlight text={readableMarkers(t, item.preview) || t('empty')}
         query={query} />}
         open={item.filtered === undefined ? go({ page: 'trigger', id: item.threads[0]!, query: { trigger: item.id } }) : undefined}>
-        <span>{valueLabel(t, 'source', item.source)}</span><span>{actorName(t, item.actor)}</span><When at={item.at} />
+        <span>{sourceLabel(t, item.source, state?.project_orchestrators)}</span><span>{actorName(t, item.actor)}</span><When at={item.at} />
         {item.threadTitle && <span className="dt-ellipsis">{t('inThread', { thread: readableMarkers(t, item.threadTitle) })}</span>}
         {item.filtered !== undefined && <span>{t('searchFiltered', { reason: reasonLabel(t, item.filtered) })}</span>}
       </Result>)}
@@ -108,7 +108,7 @@ function OrchestratorSessions({ projects, masterId }: { projects?: ProjectOrches
   if (!projects.length) return null
   const canOpen = ({ enabled, ready, status }: ProjectOrchestrators[number]) => enabled && ready && (status === 'idle' || status === 'running')
   const only = projects.length === 1 ? projects[0] : undefined
-  if (only && canOpen(only)) return <SessionButton variant="outline" sessionId={only.session_id} label={t('openProjectSession')} />
+  if (only && canOpen(only)) return <span title={t('openOrchestratorHint')}><SessionButton variant="outline" sessionId={only.session_id} label={t('openProjectSession')} /></span>
   return <>
     <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} aria-haspopup="dialog" aria-expanded={open}
       onClick={() => setOpen(true)}>{t('projectSessions')}</Button>

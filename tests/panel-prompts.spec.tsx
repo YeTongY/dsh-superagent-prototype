@@ -19,7 +19,7 @@ it('lists the team sections, then the built-in parts, edits and saves them separ
   await click(tab(zh.promptViewFull))
   // The full prompt shows every part, team or built in, as editable, in the order the Session reads them.
   const parts = all('.dt-preview-part').map(part => [part.querySelector('b')?.textContent, part.hasAttribute('data-editable')])
-  expect(parts.slice(0, 5)).toEqual([['共享约定', true], ['主 Session 角色', true], ['沟通方式', true], ['工单范围', true], ['交付要求', true]])
+  expect(parts.slice(0, 5)).toEqual([['共享约定', true], ['编排会话角色', true], ['沟通方式', true], ['工单范围', true], ['交付要求', true]])
   expect(text()).toContain('Custom communication rule')
   await click(all('.dt-preview-part').find(part => part.querySelector('b')?.textContent === '沟通方式')!.querySelector('button')!)
   await click(zh.promptResetSection)
@@ -36,7 +36,7 @@ it('keeps a conflicting prompt draft, rebases it onto the newer version and save
   await type(field<HTMLTextAreaElement>(zh.promptBody), 'Mine')
   server.prompts.revision = 1; server.prompts.current = promptVersion(1, { ...defaultPrompts(), scope: 'Theirs' })
   await click(zh.save)
-  expect(document.querySelector('.dt-savebar')?.textContent).toContain('提示词已被修改到版本 1。已保留你的草稿')
+  expect(document.querySelector('.dt-savebar')?.textContent).toContain('提示词已在别处更新到版本 1。已保留你的草稿')
   await click(zh.save)
   // The other save's section stays: the draft moved onto version 1 section by section, not as a whole.
   expect(server.prompts.current.config).toMatchObject({ communication: 'Mine', scope: 'Theirs' })
@@ -137,7 +137,7 @@ it('says which placeholders a template keeps', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
   await click(builtInItem(zh['promptPart.runtime/policy']))
-  expect(text()).toContain('这是模板：保留占位符 {version}、{mode}、{rules}，由系统填入内容。')
+  expect(text()).toContain('这是系统模板：请保留占位符 {version}、{mode}、{rules}，运行时会自动填入内容。')
   expect(text()).toContain(zh['promptReadBy.orchestrator'])
 })
 
@@ -153,7 +153,7 @@ it('marks an override whose built-in text an upgrade changed, shows how it chang
   await click(builtInItem(zh['promptPart.runtime/dispatch']))
   // The change of the built-in text, beside the team's text, which stays, in a region named by the mark.
   const box = () => document.querySelector(`section[aria-label="${zh.promptDefaultUpdated}"]`)
-  expect(box()!.textContent).toContain('下面是默认内容的变化。')
+  expect(box()!.textContent).toContain('以下是默认内容的变更对比：')
   expect([...box()!.querySelectorAll('del')].map(line => line.textContent)).toEqual(['The old routing.\n'])
   expect(box()!.querySelectorAll('ins').length).toBeGreaterThan(0)
   expect(field<HTMLTextAreaElement>(zh.promptBody).value).toBe('## dispatch\nOur routing.')
@@ -181,8 +181,8 @@ it('shows the team\'s text against the new default when the default it was edite
   await click(builtInItem(zh['promptPart.runtime/dispatch']))
   const box = document.querySelector(`section[aria-label="${zh.promptDefaultUpdated}"]`)!
   // It says the lines are the team's text against the new default, not how the default changed.
-  expect(box.textContent).toContain('系统没有记录你编辑时的默认内容；下面是你的文本与新默认内容的对比。')
-  expect(box.textContent).not.toContain('下面是默认内容的变化。')
+  expect(box.textContent).toContain('未记录你修改时的旧版默认值；以下是你的正文与新版默认内容的对比：')
+  expect(box.textContent).not.toContain('以下是默认内容的变更对比：')
   expect([...box.querySelectorAll('del')].map(line => line.textContent)).toEqual(['Our routing.\n'])
   expect([...box.querySelectorAll('ins')].map(line => line.textContent).join('')).toBe(`${dispatch.text.split('\n').slice(1).join('\n')}\n`)
 })
@@ -213,7 +213,7 @@ it('shows a draft\'s template of a generated part filled, and names a part by it
   await click(builtInItem(zh['promptPart.runtime/policy']))
   await type(field<HTMLTextAreaElement>(zh.promptBody), '## Policy\n{version} {mode}')
   await click(zh.save)
-  expect(text()).toContain(`「${zh['promptPart.runtime/policy']}」的模板必须保留占位符 {rules}`)
+  expect(text()).toContain(`「${zh['promptPart.runtime/policy']}」模板必须保留系统占位符 {rules}`)
 })
 
 it('lists the overrides of parts this version no longer has, which the next save drops', async () => {

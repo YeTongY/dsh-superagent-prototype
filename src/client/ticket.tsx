@@ -3,10 +3,10 @@ import { useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type TicketPageView } from './api.ts'
 import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
-import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
+import { actorName, localized, readableMarkers, reasonLabel, sourceLabel, valueLabel, when } from './text.ts'
 import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
   StageMark, When } from './widgets.tsx'
 
@@ -67,6 +67,7 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
 }
 function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: string }) {
   const { t, navigate } = usePanel()
+  const { state } = usePanelData()
   const { mandate, decision } = ticket
   const fact = (item: TicketPageView['basis']['facts'][number]): string => {
     if (item.name === 'legacyAuthority') return valueLabel(t, 'legacy', item.value)
@@ -84,7 +85,7 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
     [t('term.trigger'), <button type="button" className="dt-trigger-link" onClick={() => navigate({ page: 'trigger', id: decision.thread,
       query: { trigger: decision.triggerIds[0] ?? '' } })}>
       <span className="dt-trigger-text">{readableMarkers(t, decision.preview) || t('empty')}</span>
-      <span className="dt-row-meta"><span>{valueLabel(t, 'source', mandate.actor.source)} · {actor}</span><When at={decision.at} /></span>
+      <span className="dt-row-meta"><span>{sourceLabel(t, mandate.actor.source, state?.project_orchestrators)} · {actor}</span><When at={decision.at} /></span>
     </button>],
     [t('term.decision'), <div className="dt-kv-stack">
       <span>{decisionMark(t, decision.outcome).label}</span>
@@ -108,6 +109,7 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
 
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
+  const { state } = usePanelData()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
   const after = async (request: Promise<unknown>) => { await request; await reload() }
   if (!data) return <><PageHead
@@ -128,7 +130,7 @@ export function TicketPage({ id }: { id: string }) {
   const channel = data.channels[0]
   return <>
     <PageHead title={data.title}>
-      {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: valueLabel(t, 'source', opening.source) })}</ActionLink>}
+      {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: sourceLabel(t, opening.source, state?.project_orchestrators) })}</ActionLink>}
       {data.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
         message={t('retryConfirm', { title: data.title })}
         onConfirm={() => after(call('POST tickets/:id/retry', { id }))} />}
@@ -138,7 +140,7 @@ export function TicketPage({ id }: { id: string }) {
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
       <LabelValue label={t('ticketMandateLabel')} value={valueLabel(t, 'strength', data.mandate.strength)} />
-      <LabelValue label={t('ticketActorLabel')} value={`${valueLabel(t, 'source', data.mandate.actor.source)} · ${actor}`} />
+      <LabelValue label={t('ticketActorLabel')} value={`${sourceLabel(t, data.mandate.actor.source, state?.project_orchestrators)} · ${actor}`} />
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />
     </div>
     {ended && <Hint>{ended}</Hint>}

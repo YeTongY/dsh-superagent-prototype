@@ -1,4 +1,4 @@
-/** Eval status view (Decision log) and Eval settings group (Policy rules, per-Source admission, and assessor settings). */
+/** Eval status view (Decision log) and Rules & Access settings group (Auto-accept, Policy rules, and per-Source permissions). */
 import { useState } from 'react'
 import { ADMISSION_DEFAULTS, ADMISSION_OPTIONS, type Admission, type AdmissionCell } from '../admission.ts'
 import type { AdmissionRowView } from '../sources/kind.ts'
@@ -7,8 +7,9 @@ import { DECISION_FILTERS, DECISION_KINDS, loadList, usePoll, type DecisionFilte
 import { Button, DisclosureRow, Icon, InfoTip, Input, Pill, SegmentedControl, Switch } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { useAction, usePanel } from './provider.tsx'
+import { settingsRoute } from './route.ts'
 import { DecisionLine } from './rows.tsx'
-import { ConfigHistory, Field, Fields, ModelField, SourceField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
+import { ConfigHistory, Field, Fields, ModelField, numberOf, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized, valueLabel, when } from './text.ts'
 import { Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
@@ -101,7 +102,7 @@ function AdmissionTable({ rows, labels, table, explicit, onChange }: {
   rows: AdmissionRowView[]; labels: Record<string,
     string>; table: AdmissionTable; explicit: string; onChange: (table: AdmissionTable) => void
 }) {
-  const { t } = usePanel()
+  const { t, navigate } = usePanel()
   const name = (row: AdmissionRowView) => labels[row.id] ?? localized(t, row.label)
   const set = (row: string, cell: AdmissionCell, value: Admission) => onChange({ ...table, [row]: { ...table[row], [cell]: value } })
   const select = (row: AdmissionRowView, cell: AdmissionCell) => {
@@ -120,16 +121,25 @@ function AdmissionTable({ rows, labels, table, explicit, onChange }: {
     <Hint>{explicit}</Hint>
     <table className="dt-table dt-admission">
       <thead>
-        <tr><th rowSpan={2}>{t('admissionScope')}</th><th>{t('admissionListed')}</th><th colSpan={2}>{t('admissionUnlisted')}</th></tr>
-        <tr><th>{t('admissionUnaddressed')}</th><th>{t('admissionAddressed')}</th><th>{t('admissionUnaddressed')}</th></tr>
+        <tr>
+          <th>{t('admissionScope')}</th>
+          <th>{t('admissionCell.listedUnaddressed')}</th>
+          <th>{t('admissionCell.unlistedAddressed')}</th>
+          <th>{t('admissionCell.unlistedUnaddressed')}</th>
+        </tr>
       </thead>
       <tbody>{rows.map(row => <tr key={row.id}>
         <td className="dt-admission-scope">{name(row)}<small>{localized(t, row.note)}</small></td>
         {CELLS.map(cell => row.cells[cell] ? select(row, cell) : <td key={cell} className="dt-admission-na"
-          aria-label={t('admissionNotReceived')}>—</td>)}
+          title={t('admissionNotReceived')} aria-label={t('admissionNotReceived')}>—</td>)}
       </tr>)}</tbody>
     </table>
     <Hint>{t('admissionFootnote')}</Hint>
+    <div>
+      <button type="button" className="dt-textlink dt-inline-btn" onClick={() => navigate(settingsRoute('source'))}>
+        {t('admissionManageSources')}
+      </button>
+    </div>
   </Section>
 }
 
@@ -153,6 +163,11 @@ function PolicyBlock() {
     && target.closest('.dt-rules')) setExpanded(new Set(policy.rules.map(rule => rule.id))) }
   const part = (id: string) => (policy.sources[id] ?? { allowed: [] }) as Part
   const add = () => insert({ id: crypto.randomUUID(), name: '', enabled: true, instruction: '' }, policy.rules.length)
+  const tabLabel = (source: SourceView) => {
+    const base = localized(t, source.title)
+    const repo = typeof source.value.config.repository === 'string' ? source.value.config.repository.trim() : ''
+    return repo ? `${base} · ${repo}` : base
+  }
   return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}
     onInvalidCapture={event => reveal(event.target)}>
     <Fields disabled={draft.busy}>
@@ -176,7 +191,7 @@ function PolicyBlock() {
         {parts.length > 1 && <div className="dt-subtabs" role="tablist" aria-label={t('policyPerSource')}>
           {parts.map(source => <button key={source.id} type="button" role="tab" aria-selected={source === current} className="dt-subtab"
             onClick={() => setTab(source.id)}>
-            {localized(t, source.title)}
+            {tabLabel(source)}
           </button>)}
         </div>}
         <SourcePart key={current.id} source={current} part={part(current.id)}
@@ -203,6 +218,7 @@ function EvalBlock() {
         <SegmentedControl className="dt-segmented" label={t('acceptMode')} value={value.mode} onChange={mode => edit({ mode })}
           options={(['off', 'observe', 'auto'] as const).map(mode => ({ value: mode, label: valueLabel(t, 'mode', mode),
             title: t(`modeOption.${mode}`) }))} />
+        <Hint>{t(`modeOption.${value.mode}`)}</Hint>
       </Section>
       <Field label={t('evalTimeout')} hint={t('evalTimeoutHint')}>
         <Input type="number" min={LIMITS.evalTimeoutSeconds.min} max={LIMITS.evalTimeoutSeconds.max} required value={value.timeoutSeconds}
@@ -217,9 +233,11 @@ function EvalBlock() {
 }
 
 export function EvalSettings({ version }: { version?: string | undefined }) {
+  const { t } = usePanel()
   return <div className="dt-form">
-    <PolicyBlock />
+    {version && <p className="dt-banner">{t('policyFocusBanner', { version: version.slice(0, 8) })}</p>}
     <EvalBlock />
+    <PolicyBlock />
     <ConfigHistory blocks={['policy', 'eval']} versions {...version ? { focus: version } : {}} />
   </div>
 }

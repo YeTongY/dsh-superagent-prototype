@@ -8,7 +8,7 @@ import { Button, DisclosureRow, Icon, InfoTip, Input, SegmentedControl, Switch }
 import { useDraft } from './draft.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute } from './route.ts'
-import { errorText, localized, valueLabel, when, type T } from './text.ts'
+import { errorText, localized, sourceLabel, valueLabel, when, type T } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 
 /** Parse a numeric input string, returning `null` when empty so the server rejects blank required numbers instead of coercing to 0. */
@@ -73,47 +73,102 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
   const { t, call } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
   const [error, setError] = useState<string>()
+  const [custom, setCustom] = useState(() => value !== null)
+  const [manual, setManual] = useState(false)
   useEffect(() => { call('GET models').then(setCatalog, failure => setError(errorText(failure))) }, [call])
+  useEffect(() => { if (value !== null) setCustom(true) }, [value])
   const current = { provider: value?.provider ?? '', model: value?.model ?? '', effort: value?.reasoningEffort ?? '' }
   const set = (next: Partial<typeof current>) => {
     const { provider, model, effort } = { ...current, ...next }
     onChange(provider.trim() || model.trim() || effort.trim() ? { provider, model, ...effort ? { reasoningEffort: effort } : {} } : null)
   }
-  const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
+  const groups = catalog?.groups ?? []
+  const group = groups.find(item => item.id === current.provider.trim())
+  const models = group?.models ?? []
+  const modelEntry = models.find(item => item.id === current.model.trim())
+  const efforts = modelEntry?.reasoning?.efforts ?? []
+  const unknownValue = !!(current.provider.trim() && !group) || !!(current.model.trim() && group && !modelEntry)
+    || !!(current.effort.trim() && modelEntry && !efforts.some(item => item.id === current.effort.trim()))
+  const useManual = manual || !groups.length || unknownValue
   const fallback = catalog?.default
   const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
     <Input list={`${id}-${name}s`} spellCheck={false} placeholder={placeholder} value={current[name]}
       onChange={event => set({ [name]: event.target.value })} />
   </Field>
   return <div className="dt-model">
+    <div className="dt-model-bar">
+      <SegmentedControl className="dt-segmented dt-model-mode" label={t('modelModeDefault')} value={custom ? 'custom' : 'default'}
+        options={[{ value: 'default', label: t('modelModeDefault') }, { value: 'custom', label: t('modelModeCustom') }]}
+        onChange={next => {
+          if (next === 'default') { setCustom(false); onChange(null) }
+          else {
+            setCustom(true)
+            const firstGroup = groups[0]
+            const firstModel = firstGroup?.models[0]
+            if (!value && firstGroup && firstModel) set({ provider: firstGroup.id, model: firstModel.id, effort: '' })
+          }
+        }} />
+      {custom && groups.length > 0 && <Button variant="ghost" size="sm" onClick={() => setManual(!useManual)}>
+        {t(useManual ? 'modelUseList' : 'modelCustomInput')}
+      </Button>}
+    </div>
     <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
       ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
-    <div className="dt-grid3">
+    {custom && (useManual ? <div className="dt-grid3">
       {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
         t('modelEffort'), t('modelEffortDefault'))}
-    </div>
-    <datalist id={`${id}-providers`}>{catalog?.groups.map(group => <option key={group.id}
-      value={group.id}>{group.name}</option>)}</datalist>
+    </div> : <div className="dt-grid3">
+      <Field label={t('modelProvider')}>
+        <select className="dt-select" value={current.provider} onChange={event => {
+          const picked = groups.find(item => item.id === event.target.value)
+          set({ provider: event.target.value, model: picked?.models[0]?.id ?? '', effort: '' })
+        }}>
+          <option value="" disabled>{t('modelSelectProvider')}</option>
+          {groups.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+        </select>
+      </Field>
+      <Field label={t('modelName')}>
+        <select className="dt-select" value={current.model} disabled={!models.length} onChange={event => {
+          const picked = models.find(item => item.id === event.target.value)
+          const keepEffort = picked?.reasoning?.efforts?.some(item => item.id === current.effort)
+          set({ model: event.target.value, effort: keepEffort ? current.effort : '' })
+        }}>
+          <option value="" disabled>{t('modelSelectModel')}</option>
+          {models.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+        </select>
+      </Field>
+      <Field label={t('modelEffort')}>
+        <select className="dt-select" value={current.effort} disabled={!efforts.length}
+          onChange={event => set({ effort: event.target.value })}>
+          <option value="">{t('modelEffortDefault')}</option>
+          {efforts.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+        </select>
+      </Field>
+    </div>)}
+    <datalist id={`${id}-providers`}>{groups.map(item => <option key={item.id}
+      value={item.id}>{item.name}</option>)}</datalist>
     <datalist id={`${id}-models`}>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
     <datalist id={`${id}-efforts`}>
-      {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
-        value={effort.id}>{effort.name}</option>)}
+      {efforts.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
     </datalist>
   </div>
 }
 
 type HistoryChange = NonNullable<HistoryView['items'][number]['changes']>[number]
-function changeText(t: T, change: HistoryChange, sources: SourceView[]): string {
+function changeText(t: T, change: HistoryChange, sources: SourceView[],
+  projects?: readonly { project_source_id: string; repository: string; host?: string }[]): string {
   const source = sources.find(item => item.id === change.source)
   const field = (change.part ? source?.policy?.fields : source?.fields)?.find(item => item.key === change.field)
   const shown = (value: unknown) => value === undefined || value === null || value === '' ? t('unsetValue') : typeof value === 'boolean'
     ? t(value ? 'yes' : 'no')
     : change.code === 'mode' ? valueLabel(t, 'mode', String(value)) : String(value)
+  const repo = change.source ? sourceLabel(t, change.source, projects) : ''
+  const sourceText = source ? (repo && repo !== localized(t, source.title) ? `${localized(t, source.title)} · ${repo}`
+    : localized(t, source.title)) : (repo || change.source || '')
   return t(`change.${change.code}`,
     { items: (change.items ?? []).map(item => source?.labels[item] ?? item).join(t('listSeparator')),
-    from: shown(change.from), to: shown(change.to), name: change.name ?? '', source: source ? localized(t, source.title)
-      : change.source ?? '',
+    from: shown(change.from), to: shown(change.to), name: change.name ?? '', source: sourceText,
     field: field ? localized(t, field.label) : change.field ?? '' })
 }
 /**
@@ -123,7 +178,7 @@ function changeText(t: T, change: HistoryChange, sources: SourceView[]): string 
 export function ConfigHistory({ blocks, versions, focus }: { blocks: string[]; versions?: boolean; focus?: string }) {
   const { t, call } = usePanel()
   const { settings } = useSettings()
-  const { sources } = settings
+  const { sources, project_orchestrators } = settings
   const [open, setOpen] = useState(!!focus)
   const [data, setData] = useState<HistoryView>()
   const [error, setError] = useState<string>()
@@ -150,7 +205,8 @@ export function ConfigHistory({ blocks, versions, focus }: { blocks: string[]; v
           <div className="dt-event-foot">{when(item.savedAt, t('lang'))}{item.policyChanged && <> · {t('historyPolicyChanged',
             { version: item.policyVersion.slice(0, 8) })}</>}</div>
           {item.changes === null ? <Hint>{t('historyNoBaseline')}</Hint> : item.changes.length
-            ? <ul className="dt-changes">{item.changes.map((change, index) => <li key={index}>{changeText(t, change, sources)}</li>)}</ul>
+            ? <ul className="dt-changes">{item.changes.map((change, index) => <li key={index}>{changeText(t, change, sources,
+              project_orchestrators)}</li>)}</ul>
               : <Hint>{t('historyNoChanges')}</Hint>}
           {item.notified.length > 0 && <Hint>{t('historyNotified', { count: item.notified.length,
             titles: item.notified.map(ticket => ticket.title).join(t('listSeparator')) })}</Hint>}
@@ -213,6 +269,7 @@ function RowsField({ field, value, saved, onChange, labels, refreshLabels }: {
       required={!column.optional} pattern={column.pattern} spellCheck={false} value={row[column.key] ?? ''}
         onChange={event => change(event.target.value)} />
   }
+  const showRows = rows.length > 0 && (rows.length <= ROWS_SHOWN || open)
   return <div className="dt-field">
     <div className="dt-subhead">
       <span className="dt-field-head">{label}{hint && <InfoTip text={hint} />}<span className="dt-count">{rows.length || ''}</span></span>
@@ -228,8 +285,13 @@ function RowsField({ field, value, saved, onChange, labels, refreshLabels }: {
       onClick={() => setOpen(!open)}>
       {open ? t('collapse') : rows.map(rowName).join(t('listSeparator'))}
     </button>}
-    {(rows.length <= ROWS_SHOWN || open) && <ul className="dt-rows"
-      style={{ ['--dt-columns' as string]: field.columns.length }}>{rows.map((row, index) => <li key={index} className="dt-rows-item">
+    {showRows && field.columns.length >= 2 && <div className="dt-rows-head" data-columns={field.columns.length}
+      style={{ ['--dt-columns' as string]: field.columns.length }}>
+      {field.columns.map(column => <span key={column.key}>{localized(t, column.label)}</span>)}<span />
+    </div>}
+    {showRows && <ul className="dt-rows"
+      style={{ ['--dt-columns' as string]: field.columns.length }}>{rows.map((row, index) => <li key={index} className="dt-rows-item"
+        data-columns={field.columns.length}>
       {field.columns.map(column => cell(row, index, column))}
       <Button variant="ghost" size="sm" icon={<Icon name="trash" />} aria-label={t('removeRow', { name: labels[row[key.key] ?? '']
         || row[key.key] || label })}

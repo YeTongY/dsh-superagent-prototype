@@ -44,7 +44,7 @@ it('keeps a refused Deployment change as a draft, and shows the settings read-on
   expect(text()).toContain(zh.deploymentReadOnly)
   server.form = undefined
   await remount()
-  expect(text()).toContain('这个 DSH 版本不提供配置表单')
+  expect(text()).toContain('当前 DSH 版本未开放配置表单')
   expect(field<HTMLInputElement>(zh.deploymentPromptMaxChars)).toMatchObject({ disabled: true, value: '100000' })
   expect(all('button').some(button => button.textContent === '保存')).toBe(false)
 })
@@ -57,7 +57,7 @@ it('merges a Deployment draft into the values another page saved meanwhile, and 
   await type(field<HTMLInputElement>(zh.deploymentContextPages), '20')
   // The Plugin Manager page saves another field of the same entry meanwhile.
   await act(async () => { await shared.mutate([{ op: 'set', path: ['promptMaxChars'], value: 50000 }], 1) })
-  expect(text()).toContain('设置已在别处修改，你的修改已合并到最新版本')
+  expect(text()).toContain('设置已在别处更新，你的修改已自动合并到最新版本')
   expect(field<HTMLInputElement>(zh.deploymentPromptMaxChars).value).toBe('50000')
   await click(zh.save)
   expect(mutations.at(-1)).toEqual({ revision: 2, ops: [{ op: 'set', path: ['admissionContextMaxPages'], value: 20 }] })
@@ -82,10 +82,10 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   expect(container.textContent).toBe('')
   server.form = fakeForm().form
   await render('page')
-  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', '账号在 dsh-superagent 面板的来源设置里修改。']) expect(text()).toContain(fact)
+  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', zh.deploymentAccountsWhere]) expect(text()).toContain(fact)
   server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
   await render('page')
-  expect(text()).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
+  expect(text()).toContain('环境检查未通过：GitHub 尚未填写监听的仓库路径。')
   expect(field<HTMLInputElement>(zh.deploymentPromptMaxChars).disabled).toBe(false)
   server.down = true
   await render('page')

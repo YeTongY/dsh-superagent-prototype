@@ -14,7 +14,7 @@ it('states why a filtered search result has no Thread instead of opening an empt
   await mount()
   await type(field<HTMLInputElement>(zh.searchLabel), 'issue')
   await act(async () => { field<HTMLInputElement>(zh.searchLabel).closest('form')!.requestSubmit() }); await settle()
-  expect(text()).toContain('被来源过滤：来源已停用')
+  expect(text()).toContain('已被来源过滤：对应仓库或渠道已停用')
   expect(all('.dt-search-results button').some(button => button.textContent === 'issue text')).toBe(false)
 })
 
@@ -23,7 +23,7 @@ it('opens a search result older than the newest page around its Trigger', async 
   await mount()
   await type(field<HTMLInputElement>(zh.searchLabel), 'message')
   await act(async () => { field<HTMLInputElement>(zh.searchLabel).closest('form')!.requestSubmit() }); await settle()
-  expect(text()).toContain('找到 0 个工单、0 个线程、1 条触发')
+  expect(text()).toContain('找到 0 个工单、0 个对话、1 条消息')
   await click(all('.dt-search-results button').find(button => button.textContent === 'message e1')!)
   expect(server.requests.some(request => request.path.includes('around=e1'))).toBe(true)
   expect(document.querySelector('.dt-highlight')?.textContent).toContain('message e1')
@@ -33,7 +33,7 @@ it('explains what can be searched when nothing matches', async () => {
   await mount()
   await type(field<HTMLInputElement>(zh.searchLabel), 'nothing')
   await act(async () => { field<HTMLInputElement>(zh.searchLabel).closest('form')!.requestSubmit() }); await settle()
-  expect(text()).toContain('没有找到。可以输入触发文字')
+  expect(text()).toContain('未找到相关记录。可输入消息内容')
 })
 
 it('returns to the exact page after a remount of the main panel', async () => {
@@ -45,16 +45,16 @@ it('returns to the exact page after a remount of the main panel', async () => {
 
 it('shows domain terms in the interface language only and lists both languages in the (?) glossary', async () => {
   await mount(en)
-  expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['Overview', 'Source', 'Trigger', 'Eval', 'Execution', 'Settings'])
+  expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['Overview', 'Connections', 'Conversations', 'Decisions', 'Tickets', 'Settings'])
   await click('Glossary')
   const dialog = document.querySelector('[role="dialog"]')!
-  const row = [...dialog.querySelectorAll('tr')].find(item => item.textContent?.startsWith('Ticket'))!
-  expect([...row.querySelectorAll('td')].map(cell => cell.textContent)).toEqual(['Ticket', '工单', 'An authorized unit of work'])
+  const row = [...dialog.querySelectorAll('tr')].find(item => item.querySelector('td')?.textContent === 'Ticket')!
+  expect([...row.querySelectorAll('td')].map(cell => cell.textContent)).toEqual(['Ticket', '工单', en['meaning.ticket']])
   expect(dialog.textContent).toContain('Accept 接单')
   // Terms are grouped the way the tabs follow the flow, after the roles that act in it.
-  expect([...dialog.querySelectorAll('th.dt-glossary-group')].map(cell => cell.textContent)).toEqual(['Roles', 'Source', 'Trigger', 'Eval',
-    'Execution'])
-  expect([...dialog.querySelectorAll('tr')].find(item => item.textContent?.startsWith('Main Session'))!.textContent).toContain('prompts call it the orchestrator')
+  expect([...dialog.querySelectorAll('th.dt-glossary-group')].map(cell => cell.textContent)).toEqual(['Roles', 'Connections', 'Conversations', 'Decisions',
+    'Tickets'])
+  expect([...dialog.querySelectorAll('tr')].find(item => item.querySelector('td')?.textContent === en['term.mainSession'])!.textContent).toContain('called orchestrator in prompts')
 })
 
 it('says dsh-superagent is not answering when its routes are gone, as while it restarts', async () => {
