@@ -150,3 +150,50 @@ it('ends a restart that never stopped answering after half a minute, and reads t
   await advance(2_000)
   expect(reads()).toBe(ended + 1)
 })
+
+it('shows build metadata, host update-status, and runs manual GHCR update checks', async () => {
+  server.update = {
+    current: {
+      version: '0.1.0',
+      commit: '1111111111111111111111111111111111111111',
+      buildTime: '2026-11-26T00:00:00Z',
+      image: 'ghcr.io/owner/dsh-superagent-prototype:edge',
+    },
+    hostStatus: {
+      checkedAt: '2026-11-26T08:30:00Z',
+      action: 'deferred',
+      image: 'ghcr.io/owner/dsh-superagent-prototype:edge',
+      currentImageId: 'sha256:old',
+      targetImageId: 'sha256:new',
+      upToDate: false,
+      runningWorkers: 1,
+      runtimeState: 'ready',
+      rollbackTag: null,
+      error: null,
+    },
+  }
+  at({ page: 'settings', query: { group: 'deployment' } })
+  await mount()
+  expect(text()).toContain('v0.1.0')
+  expect(text()).toContain('111111111111')
+  expect(text()).toContain(zh['hostUpdateAction.deferred'])
+
+  await click(zh.deploymentUpdateCheck)
+  expect(server.requests.some(request => request.path === 'update/check' && request.method === 'POST')).toBe(true)
+  expect(text()).toContain(zh.deploymentUpdateUpToDate)
+
+  server.updateCheck = image => ({
+    checkedAt: '2026-11-26T09:10:00Z',
+    image: image || 'ghcr.io/owner/dsh-superagent-prototype:edge',
+    state: 'update_available',
+    currentCommit: '1111111111111111111111111111111111111111',
+    remoteDigest: 'sha256:new-digest',
+    remoteCommit: '2222222222222222222222222222222222222222',
+    remoteCommitAt: '2026-11-26T09:00:00Z',
+    remoteCommitMessage: 'feat: newer build',
+  })
+  await click(zh.deploymentUpdateCheck)
+  expect(text()).toContain(zh.deploymentUpdateAvailable)
+  expect(text()).toContain('222222222222')
+  expect(text()).toContain('scripts/docker-auto-update update')
+})

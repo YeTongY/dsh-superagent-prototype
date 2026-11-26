@@ -11,7 +11,7 @@ import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, buil
 import type { DecisionRow, DroppedReply, HistoryView, Problem, ProjectOrchestratorView, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
-  TriggerRow } from '../../src/client/api.ts'
+  TriggerRow, UpdateCheckResult, UpdateStatusView } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
@@ -117,6 +117,8 @@ export interface PanelServer {
   opened: string[]
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
+  update: UpdateStatusView
+  updateCheck?: (image?: string) => UpdateCheckResult | Refusal
 }
 export let server: PanelServer
 
@@ -273,6 +275,11 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [], projectOrchestrators: [],
+    update: {
+      current: { version: '0.1.0', commit: '1111111111111111111111111111111111111111', buildTime: '2026-11-26T00:00:00Z',
+        image: 'ghcr.io/owner/dsh-superagent-prototype:edge' },
+      hostStatus: null,
+    },
     reporter: { enabled: false, runs: [] },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
@@ -418,6 +425,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET policy/history': { answer: () => server.history },
   'POST policy-sync/:id': { answer: ({ params }) => ({ policy: server.settings.policy.sources[params.id] }) },
   'POST setup/check': { answer: () => ({ restarting: true }) },
+  'GET update': { answer: () => server.update },
+  'POST update/check': { body: true, answer: ({ body }) => {
+    if (server.updateCheck) return server.updateCheck(body.image)
+    const image = body.image?.trim() || server.update.current.image || 'ghcr.io/owner/dsh-superagent-prototype:edge'
+    return {
+      checkedAt: '2026-11-26T09:00:00Z', image, state: 'up_to_date',
+      currentCommit: server.update.current.commit, remoteDigest: 'sha256:digest',
+      remoteCommit: server.update.current.commit, remoteCommitAt: '2026-11-26T08:00:00Z',
+      remoteCommitMessage: 'chore: release',
+    }
+  } },
   'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
     groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
       reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },

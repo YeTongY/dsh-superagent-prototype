@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""Safely check, pull, and apply GHCR Docker updates for a host-managed dsh-superagent Compose stack.
+
+Only pulls and restarts when workers are idle (unless `--force` is set), backs up the host data directory before
+stopping, verifies loopback runtime health after startup, and automatically rolls back image and data on failure.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent.parent
+ROLLBACK_REPO = 'dsh-superagent'
+ROLLBACK_PREFIX = 'rollback-'
+
+
+def run_cmd(cmd, *, env=None, cwd=None, check=True):
+    return subprocess.run(cmd, env=env, cwd=cwd, check=check, capture_output=True, text=True)
+
+
+def acquire_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def inspect_image(image: str):
+    result = run_cmd(['docker', 'image', 'inspect', '--format', '{{.Id}}', image], check=False)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def inspect_container(container: str):
+    result = run_cmd(['docker', 'inspect', '--format', '{{.Image}} {{.State.Running}}', container], check=False)
+    if result.returncode != 0:
+        return None, False
+    parts = result.stdout.strip().split()
+    if not parts:
+        return None, False
+    image_id = parts[0] if parts[0] != '<no value>' else None
+    running = len(parts) > 1 and parts[1].lower() == 'true'
+    return image_id, running
+
+
+def read_state(url: str):
+    parsed = urllib.parse.urlsplit(url)
+    host_header = parsed.netloc or '127.0.0.1:3082'
+    endpoint = url.rstrip('/') + '/orchestrator/api/state'
+    request = urllib.request.Request(endpoint, headers={'Host': host_header, 'x-orchestrator-request': '1'})
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    health = payload.get('health') or {}
+    runtime = health.get('runtime') if isinstance(health, dict) else {}
+    runtime_state = runtime.get('state') if isinstance(runtime, dict) else None
+    load = payload.get('load') or {}
+    running = load.get('running', 0) if isinstance(load, dict) else 0
+    try:
+        running_count = int(running)
+    except (TypeError, ValueError):
+        running_count = 0
+    return {'runtime_state': runtime_state, 'running': running_count}
+
+
+def compose_env(compose_image: str, data_dir: Path | None):
+    env = dict(os.environ)
+    env['DSH_SUPERAGENT_IMAGE'] = compose_image
+    if data_dir is not None:
+        env['DSH_SUPERAGENT_DATA_DIR'] = str(data_dir)
+    return env
+
+
+def compose_run(compose_file: Path, env: dict, *compose_args: str):
+    cmd = ['docker', 'compose', '-f', str(compose_file), *compose_args]
+    result = run_cmd(cmd, env=env, cwd=str(compose_file.parent), check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or '').strip()
+        raise RuntimeError(f"command {' '.join(cmd)} failed ({result.returncode}): {detail}")
+
+
+def create_backup(data_dir: Path, backup_dir: Path, stamp: str) -> Path:
+    backup_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
+    archive = backup_dir / f'data-auto-{stamp}.tar.gz'
+    old_umask = os.umask(0o077)
+    try:
+        result = run_cmd(['tar', '-C', str(data_dir.parent), '-czf', str(archive), data_dir.name], check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"backup failed: {(result.stderr or result.stdout).strip()}")
+        os.chmod(archive, 0o600)
+    finally:
+        os.umask(old_umask)
+    return archive
+
+
+def restore_backup(data_dir: Path, archive: Path, stamp: str) -> Path | None:
+    failed_dir = None
+    if data_dir.exists():
+        failed_dir = data_dir.with_name(f'{data_dir.name}.failed-{stamp}')
+        shutil.move(str(data_dir), str(failed_dir))
+    data_dir.parent.mkdir(parents=True, exist_ok=True)
+    result = run_cmd(['tar', '-C', str(data_dir.parent), '-xzf', str(archive)], check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"restore backup failed: {(result.stderr or result.stdout).strip()}")
+    return failed_dir
+
+
+def prune_backups(backup_dir: Path | None, keep: int):
+    if backup_dir is None or keep < 0 or not backup_dir.is_dir():
+        return
+    archives = sorted(backup_dir.glob('data-auto-*.tar.gz'), reverse=True)
+    for old in archives[keep:]:
+        old.unlink(missing_ok=True)
+
+
+def prune_rollback_tags(keep: int):
+    if keep < 0:
+        return
+    result = run_cmd(['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}', ROLLBACK_REPO], check=False)
+    if result.returncode != 0:
+        return
+    prefix = f'{ROLLBACK_REPO}:{ROLLBACK_PREFIX}'
+    tags = sorted((line.strip() for line in result.stdout.splitlines() if line.strip().startswith(prefix)), reverse=True)
+    for tag in tags[keep:]:
+        run_cmd(['docker', 'rmi', tag], check=False)
+
+
+def wait_healthy(container: str, url: str, timeout: float, interval: float):
+    deadline = time.monotonic() + timeout
+    while True:
+        _, running = inspect_container(container)
+        if running:
+            current = read_state(url)
+            if current and current['runtime_state'] in ('ready', 'paused'):
+                return current['runtime_state']
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(interval, remaining))
+
+
+def emit(payload: dict, code: int = 0) -> int:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return code
+
+
+def sanitize_error(err, redact_paths=()):
+    if not err:
+        return None
+    text = str(err)
+    for path in redact_paths:
+        if path is not None:
+            text = text.replace(str(path), f'<{path.name or "path"}>')
+    single = ' '.join(text.split())
+    return single[:400] if len(single) > 400 else single
+
+
+def write_status(status_file: Path | None, record: dict, *, redact_paths=()):
+    if status_file is None:
+        return
+    clean = {
+        'checkedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'action': record['action'],
+        'image': record['image'],
+        'currentImageId': record.get('currentImageId'),
+        'targetImageId': record.get('targetImageId'),
+        'upToDate': record.get('upToDate'),
+        'runningWorkers': record.get('runningWorkers'),
+        'runtimeState': record.get('runtimeState'),
+        'rollbackTag': record.get('rollbackTag'),
+        'error': sanitize_error(record.get('error'), redact_paths),
+    }
+    try:
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = status_file.with_name(f'.{status_file.name}.tmp.{os.getpid()}')
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            json.dump(clean, handle, ensure_ascii=False, indent=2)
+            handle.write('\n')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, status_file)
+    except OSError:
+        pass
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description='Pull a GHCR image and safely update the host dsh-superagent Compose container.')
+    parser.add_argument('action', nargs='?', default='update', choices=('check', 'update'),
+                        help='check prints whether an update is available; update applies it safely (default: update)')
+    parser.add_argument('--image', default=os.environ.get('DSH_SUPERAGENT_IMAGE', ''),
+                        help='Full container image reference (env: DSH_SUPERAGENT_IMAGE)')
+    parser.add_argument('--compose-file', default=os.environ.get('DSH_SUPERAGENT_COMPOSE_FILE', str(ROOT / 'compose.yaml')),
+                        help='Path to compose.yaml (env: DSH_SUPERAGENT_COMPOSE_FILE)')
+    parser.add_argument('--service', default=os.environ.get('DSH_SUPERAGENT_SERVICE', 'superagent'),
+                        help='Compose service name (default: superagent)')
+    parser.add_argument('--container', default=os.environ.get('DSH_SUPERAGENT_CONTAINER', 'dsh-superagent'),
+                        help='Container name for inspect checks (default: dsh-superagent)')
+    parser.add_argument('--data-dir', default=os.environ.get('DSH_SUPERAGENT_DATA_DIR', ''),
+                        help='Persistent host data directory mapped to /data (env: DSH_SUPERAGENT_DATA_DIR)')
+    parser.add_argument('--backup-dir', default=os.environ.get('DSH_SUPERAGENT_BACKUP_DIR', ''),
+                        help='Directory for pre-update tar.gz backups (default: <dirname(data-dir)>/backups)')
+    parser.add_argument('--keep-backups', type=int, default=int(os.environ.get('DSH_SUPERAGENT_KEEP_BACKUPS', '5')),
+                        help='Number of automatic backups and rollback tags to retain (default: 5)')
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL', 'http://127.0.0.1:3082'),
+                        help='Loopback management API base URL (env: DSH_SUPERAGENT_URL)')
+    parser.add_argument('--health-timeout', type=float, default=float(os.environ.get('DSH_SUPERAGENT_HEALTH_TIMEOUT', '120')),
+                        help='Seconds to wait for container runtime health after restart (default: 120)')
+    parser.add_argument('--health-interval', type=float, default=float(os.environ.get('DSH_SUPERAGENT_HEALTH_INTERVAL', '2')),
+                        help='Polling interval while waiting for health (default: 2)')
+    parser.add_argument('--lock-file', default=os.environ.get('DSH_SUPERAGENT_UPDATE_LOCK', ''),
+                        help='Single-instance lock file path')
+    parser.add_argument('--status-file', default=os.environ.get('DSH_SUPERAGENT_UPDATE_STATUS_FILE', ''),
+                        help='Sanitized JSON status file path for the management panel')
+    parser.add_argument('--force', action='store_true', help='Update even if active workers are reported running')
+    parser.add_argument('--no-backup', action='store_true', help='Skip creating a pre-update data backup')
+    parser.add_argument('--no-rollback', action='store_true', help='Disable automatic rollback on failed startup/health check')
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    image = args.image.strip()
+    if not image:
+        print('docker-auto-update: missing --image or DSH_SUPERAGENT_IMAGE', file=sys.stderr)
+        return 2
+
+    compose_file = Path(args.compose_file).resolve()
+    if not compose_file.is_file():
+        print(f'docker-auto-update: compose file not found: {compose_file}', file=sys.stderr)
+        return 2
+
+    data_dir = Path(args.data_dir).resolve() if args.data_dir.strip() else None
+    backup_dir = Path(args.backup_dir).resolve() if args.backup_dir.strip() else (
+        data_dir.parent / 'backups' if data_dir is not None else None)
+    lock_file = Path(args.lock_file).resolve() if args.lock_file.strip() else (
+        compose_file.parent / '.artifacts' / 'docker-auto-update.lock')
+    status_file = Path(args.status_file).resolve() if args.status_file.strip() else (
+        data_dir / 'superagent' / 'update-status.json' if data_dir is not None else None)
+    redact = (compose_file, compose_file.parent, data_dir, backup_dir, lock_file, status_file)
+
+    def record_status(**fields):
+        write_status(status_file, {'image': image, **fields}, redact_paths=redact)
+
+    lock_fd = acquire_lock(lock_file)
+    if lock_fd is None:
+        return emit({'action': 'locked', 'lock_file': str(lock_file)})
+
+    try:
+        pull = run_cmd(['docker', 'pull', image], check=False)
+        if pull.returncode != 0:
+            detail = (pull.stderr or pull.stdout or '').strip()
+            record_status(action='failed', error=detail)
+            return emit({'action': 'failed', 'stage': 'pull', 'image': image, 'error': detail}, 1)
+
+        target_id = inspect_image(image)
+        if not target_id:
+            record_status(action='failed', error='pulled image has no id')
+            return emit({'action': 'failed', 'stage': 'inspect_target', 'image': image, 'error': 'pulled image has no id'}, 1)
+
+        current_id, running = inspect_container(args.container)
+        up_to_date = bool(running and current_id and current_id == target_id)
+        current_state = read_state(args.url) if running else None
+        running_workers = current_state['running'] if current_state else 0
+        runtime_state_now = current_state['runtime_state'] if current_state else None
+
+        if args.action == 'check':
+            record_status(
+                action='check',
+                currentImageId=current_id,
+                targetImageId=target_id,
+                upToDate=up_to_date,
+                runningWorkers=running_workers,
+                runtimeState=runtime_state_now,
+            )
+            return emit({
+                'action': 'check',
+                'image': image,
+                'current_image_id': current_id,
+                'target_image_id': target_id,
+                'up_to_date': up_to_date,
+                'container_running': running,
+                'running_workers': running_workers,
+                'would_update': not up_to_date and (args.force or running_workers == 0),
+            })
+
+        if up_to_date:
+            record_status(
+                action='noop',
+                currentImageId=current_id,
+                targetImageId=target_id,
+                upToDate=True,
+                runningWorkers=running_workers,
+                runtimeState=runtime_state_now,
+            )
+            return emit({'action': 'noop', 'reason': 'up_to_date', 'image': image, 'image_id': target_id})
+
+        if running and not args.force and running_workers > 0:
+            record_status(
+                action='deferred',
+                currentImageId=current_id,
+                targetImageId=target_id,
+                upToDate=False,
+                runningWorkers=running_workers,
+                runtimeState=runtime_state_now,
+            )
+            return emit({
+                'action': 'deferred',
+                'reason': 'workers_running',
+                'running': running_workers,
+                'image': image,
+                'current_image_id': current_id,
+                'target_image_id': target_id,
+            })
+
+        stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+        rollback_tag = None
+        if current_id:
+            rollback_tag = f'{ROLLBACK_REPO}:{ROLLBACK_PREFIX}{stamp}'
+            tag_res = run_cmd(['docker', 'image', 'tag', current_id, rollback_tag], check=False)
+            if tag_res.returncode != 0:
+                detail = (tag_res.stderr or tag_res.stdout or '').strip()
+                record_status(
+                    action='failed',
+                    currentImageId=current_id,
+                    targetImageId=target_id,
+                    upToDate=False,
+                    runningWorkers=running_workers,
+                    error=detail,
+                )
+                return emit({'action': 'failed', 'stage': 'tag_rollback', 'image': image, 'error': detail}, 1)
+
+        backup_file = None
+        env = compose_env(image, data_dir)
+        try:
+            compose_run(compose_file, env, 'down')
+            if data_dir is not None and not args.no_backup:
+                if not data_dir.exists():
+                    raise RuntimeError(f'data directory does not exist: {data_dir}')
+                backup_file = create_backup(data_dir, backup_dir, stamp)
+            compose_run(compose_file, env, 'up', '-d', '--no-build', args.service)
+            runtime_state = wait_healthy(args.container, args.url, args.health_timeout, args.health_interval)
+            if not runtime_state:
+                raise RuntimeError(f'container failed to become healthy within {args.health_timeout:g}s')
+        except Exception as err:
+            error_msg = str(err)
+            if args.no_rollback or not rollback_tag:
+                record_status(
+                    action='failed',
+                    currentImageId=current_id,
+                    targetImageId=target_id,
+                    upToDate=False,
+                    rollbackTag=rollback_tag,
+                    error=error_msg,
+                )
+                return emit({
+                    'action': 'failed',
+                    'image': image,
+                    'error': error_msg,
+                    'backup_file': str(backup_file) if backup_file else None,
+                }, 1)
+
+            failed_data_dir = None
+            try:
+                compose_run(compose_file, compose_env(rollback_tag, data_dir), 'down')
+                if backup_file is not None and data_dir is not None:
+                    failed_data_dir = restore_backup(data_dir, backup_file, stamp)
+                compose_run(compose_file, compose_env(rollback_tag, data_dir), 'up', '-d', '--no-build', args.service)
+                rollback_state = wait_healthy(args.container, args.url, args.health_timeout, args.health_interval)
+            except Exception as rollback_err:
+                record_status(
+                    action='rollback_failed',
+                    currentImageId=current_id,
+                    targetImageId=target_id,
+                    upToDate=False,
+                    rollbackTag=rollback_tag,
+                    error=f'{error_msg}; rollback: {rollback_err}',
+                )
+                return emit({
+                    'action': 'rollback_failed',
+                    'image': image,
+                    'error': error_msg,
+                    'rollback_error': str(rollback_err),
+                    'rollback_tag': rollback_tag,
+                    'backup_file': str(backup_file) if backup_file else None,
+                }, 1)
+
+            record_status(
+                action='rolled_back',
+                currentImageId=current_id,
+                targetImageId=target_id,
+                upToDate=False,
+                rollbackTag=rollback_tag,
+                runtimeState=rollback_state,
+                error=error_msg,
+            )
+            return emit({
+                'action': 'rolled_back',
+                'image': image,
+                'error': error_msg,
+                'rollback_tag': rollback_tag,
+                'rollback_healthy': bool(rollback_state),
+                'rollback_state': rollback_state,
+                'backup_file': str(backup_file) if backup_file else None,
+                'failed_data_dir': str(failed_data_dir) if failed_data_dir else None,
+            }, 1)
+
+        prune_backups(backup_dir, args.keep_backups)
+        prune_rollback_tags(args.keep_backups)
+        record_status(
+            action='updated',
+            currentImageId=target_id,
+            targetImageId=target_id,
+            upToDate=True,
+            runningWorkers=0,
+            runtimeState=runtime_state,
+            rollbackTag=rollback_tag,
+        )
+        return emit({
+            'action': 'updated',
+            'image': image,
+            'previous_image_id': current_id,
+            'image_id': target_id,
+            'rollback_tag': rollback_tag,
+            'backup_file': str(backup_file) if backup_file else None,
+            'runtime_state': runtime_state,
+        })
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

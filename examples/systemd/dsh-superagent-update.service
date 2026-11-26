@@ -1,0 +1,10 @@
+[Unit]
+Description=Pull and safely update dsh-superagent container from GHCR
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/superagent-deploy/release
+EnvironmentFile=/srv/superagent-deploy/shared/update.env
+ExecStart=/usr/bin/python3 /srv/superagent-deploy/release/scripts/docker-auto-update update

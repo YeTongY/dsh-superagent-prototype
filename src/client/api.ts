@@ -151,3 +151,5 @@ export type PromptsView = ApiResponse<'GET prompts'>
 export type PromptConfig = PromptsView['defaults']
 export type ThreadFacts = TicketRow['threads'][number]
 export type Actor = TriggerRow['actor']
+export type UpdateStatusView = ApiResponse<'GET update'>
+export type UpdateCheckResult = ApiResponse<'POST update/check'>

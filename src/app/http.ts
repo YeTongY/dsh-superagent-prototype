@@ -13,6 +13,7 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
   from './prompts.ts'
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
+import { UpdateError, checkForUpdate, readUpdateStatus } from './update.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
@@ -94,6 +95,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   }
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
+  if (error instanceof UpdateError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
@@ -219,6 +221,11 @@ function routes(runtime: HttpHost): Routes {
     'GET policy/history': () => policyHistory(store, runtime.sources, policyVersion(store.settings())),
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),
     'POST setup/check': () => { runtime.checkSetup(); return { restarting: true } },
+    'GET update': () => readUpdateStatus(runtime.machine.stateDir),
+    'POST update/check': async ({ body }) => {
+      const request = z.object({ image: z.string().max(300).optional() }).strict().parse(await body())
+      return checkForUpdate({ stateDir: runtime.machine.stateDir, ...(request.image !== undefined ? { image: request.image } : {}) })
+    },
     'GET models': () => runtime.models(),
     'GET prompts': ({ query }) => { const { revision, offset } = PromptsQuery.parse(query); return promptsView(runtime, revision, offset) },
     'PUT prompts': async input => {
