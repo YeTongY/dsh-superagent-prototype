@@ -7,15 +7,16 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
+import { realpathSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
-import type { Variable } from './execution-environment.ts'
+import { executionRoot, type Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { bundledSkills } from './skill-files.ts'
@@ -57,6 +58,14 @@ export interface SessionsHost {
   tools(agent: Agent, ticket?: Ticket, reporter?: ReporterSessionContext, projectId?: string): Tool[]
   /** Reporter run metadata; DSH remains the owner of the Session itself. */
   reporter?(sessionId: string): ReporterSessionContext | undefined
+}
+
+function isTicketWorktreeBasename(name: string): boolean {
+  return /^[a-z]+(?:-[a-z0-9]+){0,3}-[a-f0-9]{12}$/.test(name)
+}
+
+function safeRealpath(path: string): string {
+  try { return realpathSync(path) } catch { return resolve(path) }
 }
 
 function reporterInstructions(context: ReporterSessionContext): string {
@@ -305,19 +314,22 @@ export class Sessions {
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     let createdWorkspace: { id: WorkspaceId; title?: string; setTitle?(title: string): Promise<void> } | undefined
     if ('error' in result && result.error.code === 'session/not-found') {
-      // DSH registers an existing directory. Project orchestrators own their workspace under stateDir.
-      if (role === 'orchestrator' && this.host.projectIdForSession(id)) await mkdir(cwd, { recursive: true, mode: 0o700 })
-      const registry = ctx.workspaceRegistry as {
-        create(path: string, title?: string): Promise<{ id: WorkspaceId; title?: string; setTitle?(title: string): Promise<void> }>
+      // Only per-repository orchestrators register a DSH Workspace; per-ticket workers and reporters run in `cwd` without cluttering the sidebar.
+      if (role === 'orchestrator') {
+        if (this.host.projectIdForSession(id)) await mkdir(cwd, { recursive: true, mode: 0o700 })
+        const registry = ctx.workspaceRegistry as {
+          create(path: string, title?: string): Promise<{ id: WorkspaceId; title?: string; setTitle?(title: string): Promise<void> }>
+        }
+        createdWorkspace = await registry.create(cwd, workspaceTitle)
+        await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: createdWorkspace.id, agentPreset: ROUTER_PRESET })
+      } else {
+        await ctx.sessionController.create({ sessionId: id as SessionId, ...(cwd ? { cwd } : {}),
+          agentPreset: role === 'worker' ? WORKER_PRESET : REPORTER_PRESET })
       }
-      createdWorkspace = await registry.create(cwd, workspaceTitle)
-      // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
-      await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: createdWorkspace.id,
-        agentPreset: role === 'worker' ? WORKER_PRESET : role === 'reporter' ? REPORTER_PRESET : ROUTER_PRESET })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
-    if (workspaceTitle) await this.syncWorkspaceTitle(cwd, workspaceTitle, createdWorkspace)
+    if (role === 'orchestrator' && workspaceTitle) await this.syncWorkspaceTitle(cwd, workspaceTitle, createdWorkspace)
     const settings = this.host.store.settings()
     const model = role === 'orchestrator' ? settings.eval.model : role === 'worker' ? settings.executor.model : reporterModel ?? null
     if (role === 'reporter' && !model) throw new Error('Reporter DSH model selection is unavailable')
@@ -327,6 +339,36 @@ export class Sessions {
     else if (role === 'orchestrator' && this.host.projectIdForSession(id)) ctx.permissionPresets.set(result.agent.session, 'workspace-write')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
+  }
+  /** Non-destructively removes sidebar Workspace registrations created by older builds for ephemeral ticket worktrees or reporter runs, keeping project workspaces and all logs intact. */
+  async pruneEphemeralWorkspaces(): Promise<void> {
+    const registry = this.ctx.workspaceRegistry as {
+      list?(): readonly { id: WorkspaceId; path: string; sessionIds: readonly SessionId[] }[]
+      delete?(id: WorkspaceId): Promise<boolean>
+    }
+    const workspaces = registry.list?.() ?? []
+    if (!registry.delete || !workspaces.length) return
+    const keepPaths = new Set(this.host.projectSources().map(project =>
+      safeRealpath(projectOrchestratorWorkspace(this.host.stateDir, project.id))))
+    const ticketDirs = new Set(this.host.store.tickets.list().map(ticket => ticket.execution?.directory)
+      .filter((dir): dir is string => typeof dir === 'string' && !!dir).map(safeRealpath))
+    const defaultWorkRoot = safeRealpath(join(this.host.stateDir, 'work'))
+    const customWorkRoot = safeRealpath(executionRoot(this.host.store.settings(), this.host.stateDir))
+    const statePath = safeRealpath(this.host.stateDir)
+    for (const ws of workspaces) {
+      const wsPath = safeRealpath(ws.path)
+      if (keepPaths.has(wsPath)) continue
+      const isTicketDir = ticketDirs.has(wsPath)
+        || dirname(wsPath) === defaultWorkRoot
+        || (dirname(wsPath) === customWorkRoot && isTicketWorktreeBasename(basename(wsPath)))
+      const isLegacyStateWs = wsPath === statePath
+        && ws.sessionIds.every(sid => sid === this.host.masterId || sid.startsWith('worker-') || sid.startsWith('reporter-'))
+      const isEphemeralOnly = ws.sessionIds.length > 0
+        && ws.sessionIds.every(sid => sid.startsWith('worker-') || sid.startsWith('reporter-'))
+      if (isTicketDir || isLegacyStateWs || isEphemeralOnly) {
+        await registry.delete(ws.id).catch(() => {})
+      }
+    }
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {

@@ -178,14 +178,16 @@ it('keeps a reassigned Feishu group from receiving a previous project’s queued
   expect(JSON.parse(String(opened.text))).toMatchObject({ status: 'available', messages: [{ id: 'om_13', text: newTopic.text }] })
 })
 
-it('uses readable repository workspace and session titles and updates pre-existing hash workspace titles', async () => {
+it('keeps DSH sidebar workspaces scoped to repositories only and prunes historical ticket worktree workspaces', async () => {
   host = await startRuntime(undefined, configure)
   const runtime = host.runtime
   const rename = runtime.sessions['ctx'].sessionController.rename as ReturnType<typeof vi.fn>
+  const createSession = runtime.sessions['ctx'].sessionController.create as ReturnType<typeof vi.fn>
   expect(rename).toHaveBeenCalledWith({ sessionId: one.sessionId, title: '编排 · acme/one' })
   expect(rename).toHaveBeenCalledWith({ sessionId: two.sessionId, title: '编排 · acme/two' })
 
   const wsOne = projectOrchestratorWorkspace(host.directory, one.id)
+  const wsTwo = projectOrchestratorWorkspace(host.directory, two.id)
   const setTitle = vi.fn(async () => {})
   runtime.sessions['ctx'].workspaceRegistry.resolveByPath = vi.fn(async (cwd: string) =>
     cwd === wsOne ? { id: cwd, title: 'legacy-hex-hash', setTitle } : undefined) as never
@@ -200,6 +202,23 @@ it('uses readable repository workspace and session titles and updates pre-existi
     acknowledgement: '收到。' }, one.sessionId)
   const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
   await runtime.idle()
-  expect(createWorkspace).toHaveBeenCalledWith(expect.any(String), 'acme/one · 修正标题')
+  // Worker sessions pass cwd directly without creating top-level DSH Workspaces.
+  expect(createWorkspace).not.toHaveBeenCalled()
+  expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
+    sessionId: `worker-${ticketId}`, cwd: expect.stringContaining(`fix-title-${ticketId.slice(0, 12)}`),
+    agentPreset: 'dsh-superagent-worker',
+  }))
   expect(rename).toHaveBeenCalledWith({ sessionId: `worker-${ticketId}`, title: '[acme/one] 修正标题' })
+
+  const deleted: string[] = []
+  runtime.sessions['ctx'].workspaceRegistry.list = vi.fn(() => [
+    { id: wsOne, path: wsOne, sessionIds: [one.sessionId] },
+    { id: wsTwo, path: wsTwo, sessionIds: [two.sessionId] },
+    { id: 'ws-worktree', path: `${host!.directory}/work/repository-review-fixes-a63cbb806dfd`, sessionIds: [`worker-${ticketId}`] },
+    { id: 'ws-legacy-state', path: host!.directory, sessionIds: ['reporter-auto-1'] },
+    { id: 'ws-user', path: '/tmp/user-repo', sessionIds: ['user-session-1'] },
+  ]) as never
+  runtime.sessions['ctx'].workspaceRegistry.delete = vi.fn(async (id: string) => { deleted.push(id); return true }) as never
+  await runtime.sessions.pruneEphemeralWorkspaces()
+  expect(deleted).toEqual(['ws-worktree', 'ws-legacy-state'])
 })
