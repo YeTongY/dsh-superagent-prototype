@@ -48,7 +48,7 @@ import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { bindFeishuProject as bindFeishuProjectTrigger, feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
-import { projectOrchestratorSessionId, Sessions } from './sessions.ts'
+import { projectOrchestratorSessionId, projectOrchestratorTitle, Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -253,7 +253,7 @@ export class Runtime extends Service implements SourceHost {
           if (!projectId) throw new Error('Candidate has no verifiable ProjectSource; refusing global-session delivery')
           const project = projectSources().find(item => item.id === projectId)
           const label = project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository ?? projectId
-          await sessions.ensureProjectOrchestrator(projectId, machine.stateDir, `dsh-superagent orchestrator ${label}`)
+          await sessions.ensureProjectOrchestrator(projectId, machine.stateDir, projectOrchestratorTitle(label))
           await sessions.prompt(projectOrchestratorSessionId(projectId), id, text, 'steer')
         }, candidateCard: (candidate, projectId) => candidateCard(links, candidate, projectId) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused(),
@@ -483,7 +483,7 @@ export class Runtime extends Service implements SourceHost {
     const project = this.sessions.projectOrchestrators().find(item => item.project_source_id === projectId)
     const projectLabel = project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository ?? projectId
     const orchestratorSessionId = projectOrchestratorSessionId(projectId)
-    await this.sessions.ensureProjectOrchestrator(projectId, this.machine.stateDir, `dsh-superagent orchestrator ${projectLabel}`)
+    await this.sessions.ensureProjectOrchestrator(projectId, this.machine.stateDir, projectOrchestratorTitle(projectLabel))
     const targetWorkerSessions = (state: TargetState) => new Set([...state.ticketIds].map(id => workerSessionId(id)))
     const isChildOf = (sessionId: string, roots: ReadonlySet<string>): boolean => {
       let parent = this.reporterSessionParents.get(sessionId) ?? this.ctx.agents.get(sessionId as SessionId)?.session.header.parentSession
@@ -643,7 +643,7 @@ export class Runtime extends Service implements SourceHost {
     // Restore projects independently: one Session/preset failure must not delay every other ready ProjectSource.
     await Promise.all(this.sessions.projectOrchestrators().filter(project => project.enabled && project.ready).map(async project => {
       const label = project.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project.repository
-      try { await this.sessions.ensureProjectOrchestrator(project.project_source_id, this.machine.stateDir, `dsh-superagent orchestrator ${label}`) }
+      try { await this.sessions.ensureProjectOrchestrator(project.project_source_id, this.machine.stateDir, projectOrchestratorTitle(label)) }
       catch { /* The per-project status records the safe failure code; its owning effects retry setup on demand. */ }
     }))
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })

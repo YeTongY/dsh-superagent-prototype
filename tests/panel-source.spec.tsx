@@ -22,7 +22,7 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   await click(zh.sourceOpenSettings)
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.source'])
-  expect(all('.dt-card')[1]!.textContent).toContain('环境检查未通过：尚未设置 GitHub CLI 路径。')
+  expect(document.getElementById('dt-source-github')!.textContent).toContain('环境检查未通过：尚未设置 GitHub CLI 路径。')
 })
 
 it('folds more than six chats into a line of their names', async () => {
@@ -31,7 +31,8 @@ it('folds more than six chats into a line of their names', async () => {
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['openSettingsBtn.source'], '.dt-status-head button'))
-  const summary = all('.dt-card')[0]!.querySelector('.dt-rows-summary')!
+  await click(find('飞书', '.dt-scope-tab-name'))
+  const summary = document.getElementById('dt-source-feishu')!.querySelector('.dt-rows-summary')!
   expect(summary.textContent).toBe(['团队群', 'oc_c1', 'oc_c2', 'oc_c3', 'oc_c4', 'oc_c5', 'oc_c6'].join('、'))
 })
 
@@ -39,7 +40,8 @@ it('rereads the chats the bot has joined on request and says which are new, keep
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['openSettingsBtn.source'], '.dt-status-head button'))
-  const feishu = () => all('.dt-card')[0]!
+  await click(find('飞书', '.dt-scope-tab-name'))
+  const feishu = () => document.getElementById('dt-source-feishu')!
   const button = () => [...feishu().querySelectorAll('button')].find(item => item.textContent === '刷新群列表')!
   await click([...feishu().querySelectorAll('button')].find(item => item.textContent === '添加')!)
   server.joining = { oc_new: '新群' }
@@ -56,16 +58,17 @@ it('rereads the chats the bot has joined on request and says which are new, keep
   expect([...document.querySelectorAll('.dt-toast')].at(-1)?.textContent).toBe('读取失败，保留原有列表：lark-cli: token expired')
   expect(button().disabled).toBe(false)
   // Only a field whose key column offers a refresh shows the button.
-  expect([...all('.dt-card')[1]!.querySelectorAll('button')].some(item => item.textContent === '刷新群列表')).toBe(false)
+  await click(find('acme/widgets', '.dt-scope-tab-name'))
+  expect([...document.getElementById('dt-source-github')!.querySelectorAll('button')].some(item => item.textContent === '刷新群列表')).toBe(false)
 })
 
-it('renders each Source\'s settings from its kind\'s fields and saves one Source against its own revision', async () => {
+it('renders each Source\'s settings in its scope and saves one Source against its own revision', async () => {
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['openSettingsBtn.source'], '.dt-status-head button'))
-  const cards = all('.dt-card')
-  expect(cards.map(card => card.querySelector('.dt-card-title')?.textContent)).toEqual(['飞书', 'GitHub'])
-  const feishu = cards[0]!
+  expect(all('.dt-scope-tab .dt-scope-tab-name').map(item => item.textContent)).toEqual(['acme/widgets', '飞书'])
+  await click(find('飞书', '.dt-scope-tab-name'))
+  const feishu = document.getElementById('dt-source-feishu')!
   expect(feishu.textContent).toContain('监听的飞书群')
   await click([...feishu.querySelectorAll('button')].find(button => button.textContent === '添加')!)
   const rows = feishu.querySelectorAll('.dt-rows-item')
@@ -82,7 +85,8 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
     value: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_other', listen: 'all' }],
       directMessages: false } } } })
   expect(server.settings.sources.feishu!.config).toMatchObject({ directMessages: false })
-  const github = all('.dt-card')[1]!
+  await click(find('acme/widgets', '.dt-scope-tab-name'))
+  const github = document.getElementById('dt-source-github')!
   await click('启用：GitHub')
   server.revisions['source:github'] = 5
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
@@ -119,13 +123,14 @@ it('shows project sessions on Connections status and only binding warnings insid
 
   await click(tab(zh['tab.settings']))
   expect(document.querySelector('.dt-settings-body')!.textContent).not.toContain(zh.projectOrchestratorsTitle)
+  await click(find('飞书', '.dt-scope-tab-name'))
   expect(text()).toContain(zh.feishuProjectBindingsTitle)
   expect(text()).toContain('oc_unbound')
   expect(text()).toContain(zh.projectBindingNotBound)
-  expect(all('.dt-card')[0]!.querySelectorAll('.dt-section-title')).toHaveLength(1)
+  expect(document.getElementById('dt-source-feishu')!.querySelectorAll('.dt-section-title')).toHaveLength(1)
 })
 
-it('adds GitHub and GitLab repositories from Repos & Channels settings via POST projects', async () => {
+it('adds GitHub and GitLab repositories from scoped settings via POST projects and switches into the new scope', async () => {
   await mount()
   await click(tab(zh['tab.settings']))
   await click(zh.addProject)
@@ -136,20 +141,60 @@ it('adds GitHub and GitLab repositories from Repos & Channels settings via POST 
   await type(field<HTMLInputElement>(zh.addProjectRepo), 'acme/new-repo')
   await click(zh.addProjectSubmit)
   expect(server.requests.some(request => request.path === 'projects' && request.method === 'POST')).toBe(true)
-  expect(text()).toContain('acme/new-repo')
+  expect(document.querySelector('.dt-scope-banner')?.textContent).toContain('acme/new-repo')
 
   await click(zh.addProject)
   await click('GitLab')
   await type(field<HTMLInputElement>(zh.addProjectGitlabPath), 'team/service')
   await type(field<HTMLInputElement>(zh.addProjectHost), 'gitlab.example.com')
   await click(zh.addProjectSubmit)
-  expect(text()).toContain('gitlab.example.com/team/service')
+  expect(document.querySelector('.dt-scope-banner')?.textContent).toContain('gitlab.example.com/team/service')
+})
+
+it('shows orchestrator auto-binding, inline Feishu chat bind/unbind, and repo policy inside a repository workspace', async () => {
+  const repoId = 'github-0123456789abcdef01234567'
+  server.settings = {
+    ...server.settings,
+    sources: {
+      feishu: server.settings.sources.feishu!,
+      [repoId]: { kind: 'github', enabled: true, config: { repository: 'acme/widgets', cli: 'gh' } },
+    },
+    policy: {
+      ...server.settings.policy,
+      sources: {
+        ...server.settings.policy.sources,
+        [repoId]: { allowed: [{ id: 'alice' }], admission: {} },
+      },
+    },
+  }
+  server.projectOrchestrators = [{
+    project_source_id: repoId, repository: 'acme/widgets', host: 'github.com', session_id: 'router-widgets',
+    status: 'idle', enabled: true, ready: true,
+  }]
+  await mount()
+  await click(tab(zh['tab.settings']))
+  expect(text()).toContain(zh.repoOrchestratorTitle)
+  expect(text()).toContain('编排 · acme/widgets')
+  expect(text()).toContain(zh.repoFeishuTitle)
+  expect(text()).toContain(zh.repoPolicyTitle)
+
+  await type(field<HTMLSelectElement>(zh.repoFeishuBindChat), 'oc_other')
+  await click(zh.repoFeishuBindSubmit)
+  expect(server.settings.sources.feishu!.config).toMatchObject({
+    chats: expect.arrayContaining([{ chatId: 'oc_other', projectSourceId: repoId, listen: 'mentions' }]),
+  })
+  expect(text()).toContain('另一个群')
+
+  await click(zh.repoFeishuUnbind)
+  expect(server.settings.sources.feishu!.config).toMatchObject({
+    chats: [{ chatId: 'oc_team', listen: 'mentions' }],
+  })
 })
 
 it('shows the account each CLI signs in as, and keeps a saved CLI on screen while dsh-superagent restarts', async () => {
   await mount()
   await click(tab(zh['tab.settings']))
-  const github = all('.dt-card')[1]!
+  const github = document.getElementById('dt-source-github')!
   expect(github.textContent).toContain('当前账号 @agent-bot')
   const labels = () => [...github.querySelectorAll('label')].map(label => label.textContent)
   expect(labels()).toEqual(['监听的仓库', 'GitHub CLI 路径'])
@@ -161,10 +206,12 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   expect(github.textContent).toContain('当前账号 @agent-bot')
   await click([...github.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes(zh.advanced))!)
   expect(labels()).toEqual(['监听的仓库', 'GitHub CLI 路径', '轮询间隔 / 秒', '连续失败几次后报错'])
-  expect(all('.dt-card')[0]!.textContent).toContain('当前机器人 Widgets Bot')
+  await click(find('飞书', '.dt-scope-tab-name'))
+  expect(document.getElementById('dt-source-feishu')!.textContent).toContain('当前机器人 Widgets Bot')
+  await click(find('acme/widgets', '.dt-scope-tab-name'))
   await type(field<HTMLInputElement>('GitHub CLI 路径'), '/opt/bin/gh-agent')
-  expect(github.textContent).toContain('保存后会重启服务：当前 2 个正在执行的工单会暂停并在重启后自动恢复。')
-  await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(document.getElementById('dt-source-github')!.textContent).toContain('保存后会重启服务：当前 2 个正在执行的工单会暂停并在重启后自动恢复。')
+  await act(async () => { document.getElementById('dt-source-github')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(server.settings.sources.github!.config).toMatchObject({ cli: '/opt/bin/gh-agent' })
   expect(text()).toContain(zh.savedRestarting)
   // The saved value stays, and the card's fields are disabled, until the saved revision returns with the restarted dsh-superagent.
@@ -184,12 +231,11 @@ it('points a setup problem at the settings that fix it', async () => {
   // Nothing runs while setup waits, so the Executor says so instead of counting.
   expect(text()).toContain(zh.executorWaitingSetup)
   expect(all('.dt-stat').map(stat => stat.textContent)).not.toContain('执行中2 / 3')
-  expect(text()).toContain('在「设置 › 仓库与渠道」的 GitHub 卡片修正并保存后会重新检查')
+  expect(text()).toContain('在「设置 › 仓库与关联」的当前仓库卡片修正并保存后会重新检查')
   await click(find(zh.problemSetup, 'button, a, [role="button"]'))
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.source'])
-  expect(all('.dt-card')[1]!.textContent).toContain('环境检查未通过：尚未设置 GitHub CLI 路径。')
-  expect(scroll.mock.contexts).toContain(all('.dt-card')[1])
+  expect(document.getElementById('dt-source-github')!.textContent).toContain('环境检查未通过：尚未设置 GitHub CLI 路径。')
   delete (Element.prototype as Partial<Element>).scrollIntoView
   await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
   expect(text()).toContain('环境检查未通过：尚未设置 GitHub CLI 路径。')
@@ -212,7 +258,7 @@ it('shows a failed Feishu bot check as a problem of the Feishu Source only, with
   expect(text()).toContain(zh.problemSetupFeishu)
   expect(text()).not.toContain('飞书 连接异常')
   await click(find(zh.problemSetupFeishu, 'button, a, [role="button"]'))
-  const feishu = all('.dt-card')[0]!
+  const feishu = document.getElementById('dt-source-feishu')!
   expect(feishu.textContent).toContain('环境检查未通过：应用 cli_bot 的机器人状态为 missing：请使用 lark-cli 配置应用密钥。')
   // dsh-superagent runs meanwhile, so checking again asks first: the restart interrupts running Executor Sessions.
   await click([...feishu.querySelectorAll('button')].find(button => button.textContent === zh.setupCheck)!)
@@ -264,7 +310,8 @@ it('shows a refused Source save with the output of the tool that failed on its o
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['openSettingsBtn.source'], '.dt-status-head button'))
-  const feishu = all('.dt-card')[0]!
+  await click(find('飞书', '.dt-scope-tab-name'))
+  const feishu = document.getElementById('dt-source-feishu')!
   await type(field<HTMLInputElement>('机器人 lark-cli 路径'), 'lark-broken')
   await act(async () => { feishu.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(feishu.querySelector('.dt-savebar [role="alert"]')?.textContent).toBe('机器人 lark-cli 不可用。\nlark-cli: app secret missing')
@@ -324,7 +371,7 @@ it('reads the settings again as soon as dsh-superagent answers after a save rest
   at({ page: 'settings', query: { group: 'source' } })
   await mount()
   await type(field<HTMLInputElement>('GitHub CLI 路径'), '/opt/bin/gh-agent')
-  const github = all('.dt-card')[1]!
+  const github = document.getElementById('dt-source-github')!
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(field('GitHub CLI 路径').matches(':disabled')).toBe(true)
   // dsh-superagent restarts: DSH answers with empty 404s, then it answers again.

@@ -177,3 +177,29 @@ it('keeps a reassigned Feishu group from receiving a previous project’s queued
   })
   expect(JSON.parse(String(opened.text))).toMatchObject({ status: 'available', messages: [{ id: 'om_13', text: newTopic.text }] })
 })
+
+it('uses readable repository workspace and session titles and updates pre-existing hash workspace titles', async () => {
+  host = await startRuntime(undefined, configure)
+  const runtime = host.runtime
+  const rename = runtime.sessions['ctx'].sessionController.rename as ReturnType<typeof vi.fn>
+  expect(rename).toHaveBeenCalledWith({ sessionId: one.sessionId, title: '编排 · acme/one' })
+  expect(rename).toHaveBeenCalledWith({ sessionId: two.sessionId, title: '编排 · acme/two' })
+
+  const wsOne = projectOrchestratorWorkspace(host.directory, one.id)
+  const setTitle = vi.fn(async () => {})
+  runtime.sessions['ctx'].workspaceRegistry.resolveByPath = vi.fn(async (cwd: string) =>
+    cwd === wsOne ? { id: cwd, title: 'legacy-hex-hash', setTitle } : undefined) as never
+  await runtime.sessions.ensureProjectOrchestrator(one.id, host.directory)
+  expect(setTitle).toHaveBeenCalledWith('acme/one')
+
+  const createWorkspace = vi.spyOn(runtime.sessions['ctx'].workspaceRegistry, 'create')
+  const trigger = feishu('89', '请修正标题', { chat_id: one.chatId })
+  expect(runtime.receive(trigger)).toBe('stored')
+  await runtime.idle()
+  const accepted = await host.route({ kind: 'accept', trigger_id: trigger.id, title: '修正标题', worktree_name: 'fix-title',
+    acknowledgement: '收到。' }, one.sessionId)
+  const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
+  await runtime.idle()
+  expect(createWorkspace).toHaveBeenCalledWith(expect.any(String), 'acme/one · 修正标题')
+  expect(rename).toHaveBeenCalledWith({ sessionId: `worker-${ticketId}`, title: '[acme/one] 修正标题' })
+})

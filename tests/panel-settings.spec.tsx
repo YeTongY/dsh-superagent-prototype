@@ -128,14 +128,18 @@ it('gives the focus back to the field that had it once a block\'s save ends', as
   expect(document.activeElement).toBe(input)
 })
 
-it('lists the settings groups stages first, opens each stage\'s group from its status, and returns to the last group opened',
+it('lists the settings groups grouped by scope, opens each stage\'s group from its status, and returns to the last group opened',
   async () => {
   await mount()
   await click(tab(zh['tab.settings']))
-  expect(all('.dt-settings-link').map(link => link.textContent)).toEqual(['仓库与渠道', '接单与权限', '模型与执行', '提示词', '高级与限制'])
+  expect(all('.dt-settings-section').map(section => section.textContent)).toEqual([zh['settingsSection.scoped'], zh['settingsSection.global']])
+  expect(all('.dt-settings-link').map(link => link.textContent)).toEqual([
+    zh['settingsGroup.source'], zh['settingsGroup.eval'], zh['settingsGroup.execution'], zh['settingsGroup.prompts'], zh['settingsGroup.deployment'],
+  ])
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.source'])
-  for (const [statusTab, btn, group] of [['接入状态', zh['openSettingsBtn.source'], '仓库与渠道'], ['接单记录', zh['openSettingsBtn.eval'], '接单与权限'],
-    ['工单', zh['openSettingsBtn.execution'], '模型与执行']] as const) {
+  for (const [statusTab, btn, group] of [['接入状态', zh['openSettingsBtn.source'], zh['settingsGroup.source']],
+    ['接单记录', zh['openSettingsBtn.eval'], zh['settingsGroup.eval']],
+    ['工单', zh['openSettingsBtn.execution'], zh['settingsGroup.execution']]] as const) {
     await click(find(statusTab, '[role="tab"]'))
     await click(find(btn, '.dt-status-head button'))
     expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(group)

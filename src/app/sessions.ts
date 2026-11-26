@@ -6,6 +6,7 @@ import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
@@ -88,6 +89,16 @@ export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-super
 /** Stable DSH identity for the Orchestrator that owns one ProjectSource. */
 export function projectOrchestratorSessionId(projectId: string): string {
   return `orchestrator-${key('project-orchestrator', projectId)}`
+}
+
+/** Readable repository label for workspace and session titles (`host/group/project` when non-GitHub). */
+export function projectDisplayLabel(project: { repository: string; host?: string } | undefined, fallback: string): string {
+  return project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository || fallback
+}
+
+/** Concise orchestrator session title placing role and repository first so narrow sidebars stay legible. */
+export function projectOrchestratorTitle(label: string): string {
+  return `编排 · ${label}`
 }
 
 function isProjectOrchestratorId(sessionId: string, masterId: string): boolean {
@@ -220,10 +231,19 @@ export class Sessions {
   }
   /** Resolves or creates a persistent DSH session and applies its role-specific model, prompt, tools and workspace. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
-    return this.ensureWithModel(id, cwd, title, role)
+    if (role === 'worker') {
+      const ticketId = ticketOfSession(id)
+      const projectId = ticketId ? this.host.projectForTicket(ticketId) : undefined
+      const project = projectId ? this.host.projectSources().find(item => item.id === projectId) : undefined
+      if (project && projectId) {
+        const label = projectDisplayLabel(project, projectId)
+        return this.ensureWithModel(id, cwd, `[${label}] ${title}`, role, undefined, `${label} · ${title.slice(0, 48)}`)
+      }
+    }
+    return this.ensureWithModel(id, cwd, title, role, undefined, title.slice(0, 60))
   }
   /** Creates or resumes the stable, project-scoped Orchestrator DSH Session. */
-  async ensureProjectOrchestrator(projectId: string, stateDir: string, title: string): Promise<Agent> {
+  async ensureProjectOrchestrator(projectId: string, stateDir: string, title?: string): Promise<Agent> {
     const id = projectOrchestratorSessionId(projectId)
     if (this.host.closing()) throw new Error('Runtime is stopping')
     if (this.host.projectIdForSession(id) !== projectId || !this.host.projectIds().includes(projectId)) {
@@ -231,8 +251,9 @@ export class Sessions {
     }
     const pending = this.projectSessionEnsures.get(projectId)
     if (pending) return pending
+    const label = projectDisplayLabel(this.host.projectSources().find(item => item.id === projectId), projectId)
     const workspace = projectOrchestratorWorkspace(stateDir, projectId)
-    const ensure = this.ensureWithModel(id, workspace, title, 'orchestrator')
+    const ensure = this.ensureWithModel(id, workspace, title || projectOrchestratorTitle(label), 'orchestrator', undefined, label)
       .then(agent => { this.projectSessionFailures.delete(projectId); return agent })
       .catch(error => {
         const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
@@ -246,8 +267,8 @@ export class Sessions {
   private async ensureEffectProject(projectId: string | undefined): Promise<void> {
     if (!projectId || !this.host.projectIds().includes(projectId)) throw new Error(`No ready ProjectSource can receive this Orchestrator message${projectId ? ` (${projectId})` : ''}`)
     const project = this.host.projectSources().find(item => item.id === projectId)
-    const label = project?.host && project.host !== 'github.com' ? `${project.host}/${project.repository}` : project?.repository || projectId
-    await this.ensureProjectOrchestrator(projectId, this.host.stateDir, `dsh-superagent orchestrator ${label}`)
+    const label = projectDisplayLabel(project, projectId)
+    await this.ensureProjectOrchestrator(projectId, this.host.stateDir, projectOrchestratorTitle(label))
   }
   /** Creates or resumes a Reporter Session with a DSH-supported selection and returns that exact selection for its run view. */
   async ensureReporter(id: string, cwd: string, title: string): Promise<RoleModel> {
@@ -255,24 +276,48 @@ export class Sessions {
     if ('error' in resolved && resolved.error.code !== 'session/not-found') throw resolved.error
     const requested = ('error' in resolved ? undefined : reporterSessionModel(resolved.agent))
       ?? selectReporterModel(await this.ctx.sessionController.modelCatalog())
-    const agent = await this.ensureWithModel(id, cwd, title, 'reporter', requested)
+    const reporter = this.host.reporter?.(id)
+    const projectId = reporter?.request.project_source_id
+    const project = projectId ? this.host.projectSources().find(item => item.id === projectId) : undefined
+    const label = project && projectId ? projectDisplayLabel(project, projectId) : undefined
+    const clean = title.replace(/^Reporter[：:]\s*/, '')
+    const sessionTitle = label ? `巡检 · ${label} · ${clean}` : title
+    // Shared ticket worktrees keep the ticket's workspace title; isolated reporter workspaces get the repository name.
+    const workspaceTitle = label && !reporter?.request.ticket_id ? `巡检 · ${label}` : undefined
+    const agent = await this.ensureWithModel(id, cwd, sessionTitle, 'reporter', requested, workspaceTitle)
     const selection = reporterSessionModel(agent)
     if (selection) return selection
     throw new Error('Reporter DSH Session has no persisted model selection')
   }
-  private async ensureWithModel(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker' | 'reporter', reporterModel?: RoleModel): Promise<Agent> {
+  private async syncWorkspaceTitle(cwd: string, title: string,
+    created?: { title?: string; setTitle?(title: string): Promise<void> }): Promise<void> {
+    const registry = this.ctx.workspaceRegistry as {
+      resolveByPath?(path: string): Promise<{ title?: string; setTitle?(title: string): Promise<void> } | undefined>
+    }
+    const workspace = created ?? await registry.resolveByPath?.(cwd).catch(() => undefined)
+    if (workspace?.setTitle && workspace.title !== title) {
+      await workspace.setTitle(title).catch(() => {})
+    }
+  }
+  private async ensureWithModel(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker' | 'reporter',
+    reporterModel?: RoleModel, workspaceTitle?: string): Promise<Agent> {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
+    let createdWorkspace: { id: WorkspaceId; title?: string; setTitle?(title: string): Promise<void> } | undefined
     if ('error' in result && result.error.code === 'session/not-found') {
       // DSH registers an existing directory. Project orchestrators own their workspace under stateDir.
       if (role === 'orchestrator' && this.host.projectIdForSession(id)) await mkdir(cwd, { recursive: true, mode: 0o700 })
-      const workspace = await ctx.workspaceRegistry.create(cwd)
+      const registry = ctx.workspaceRegistry as {
+        create(path: string, title?: string): Promise<{ id: WorkspaceId; title?: string; setTitle?(title: string): Promise<void> }>
+      }
+      createdWorkspace = await registry.create(cwd, workspaceTitle)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
-      await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
+      await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: createdWorkspace.id,
         agentPreset: role === 'worker' ? WORKER_PRESET : role === 'reporter' ? REPORTER_PRESET : ROUTER_PRESET })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
+    if (workspaceTitle) await this.syncWorkspaceTitle(cwd, workspaceTitle, createdWorkspace)
     const settings = this.host.store.settings()
     const model = role === 'orchestrator' ? settings.eval.model : role === 'worker' ? settings.executor.model : reporterModel ?? null
     if (role === 'reporter' && !model) throw new Error('Reporter DSH model selection is unavailable')
