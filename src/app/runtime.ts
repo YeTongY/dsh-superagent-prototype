@@ -646,6 +646,7 @@ export class Runtime extends Service implements SourceHost {
       try { await this.sessions.ensureProjectOrchestrator(project.project_source_id, this.machine.stateDir, projectOrchestratorTitle(label)) }
       catch { /* The per-project status records the safe failure code; its owning effects retry setup on demand. */ }
     }))
+    await this.sessions.pruneEphemeralWorkspaces()
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
