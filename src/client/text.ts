@@ -18,6 +18,19 @@ export function valueLabel(t: T, group: string, key: string | undefined): string
   const text = t(name)
   return text === name ? key : text
 }
+/** Resolve a Source ID (including hashed project source IDs) to a human-readable repository or channel label. */
+export function sourceLabel(
+  t: T,
+  source: string | undefined,
+  projects?: readonly { project_source_id: string; repository: string; host?: string }[],
+): string {
+  if (!source) return ''
+  const project = projects?.find(item => item.project_source_id === source)
+  if (project) return project.repository
+  if (source.startsWith('github-')) return valueLabel(t, 'source', 'github')
+  if (source.startsWith('gitlab-')) return valueLabel(t, 'source', 'gitlab')
+  return valueLabel(t, 'source', source)
+}
 /** Format one or more structured or raw reasons in the active UI language, truncating multi-line host errors to their first line. */
 export function reasonLabel(t: T, reason: string | Reason | readonly Reason[] | undefined): string {
   if (typeof reason === 'string') return reason ? label(t, { code: reason }) : ''
@@ -34,9 +47,33 @@ function label(t: T, reason: Reason): string {
 export const setupText = (t: T, problem: Pick<SetupProblem, 'code' | 'values'>): string => t(`setup.${problem.code}`, problem.values)
 export const healthText = (t: T, health: Pick<Health, 'detail' | 'code' | 'values'>): string =>
   health.code ? t(`healthCode.${health.code}` as const, health.values) : health.detail
+/** Format Feishu `template: ...` system notifications by interpolating trailing `key: value` lines. */
+function formatTemplateMessage(text: string): string {
+  if (!text.startsWith('template:')) return text
+  const lines = text.split('\n')
+  const bodyLines: string[] = []
+  const vars: Record<string, string> = {}
+  let inVars = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = i === 0 ? lines[0]!.replace(/^template:\s*/, '') : lines[i]!
+    const match = i > 0 ? /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(line) : null
+    if (match) {
+      inVars = true
+      const value = match[2]!.trim()
+      if (value) vars[match[1]!] = value
+    } else if (!inVars) {
+      bodyLines.push(line)
+    } else if (line.trim()) {
+      bodyLines.push(line)
+    }
+  }
+  const rendered = bodyLines.join(' ').trim().replace(/\{([a-zA-Z0-9_]+)\}/g, (raw, name: string) => vars[name] ?? raw)
+  return rendered || text
+}
 /** Replaces Feishu and GitHub content placeholders (images, cards, media, forwards, unresolved mentions) with localized labels. */
 export function readableMarkers(t: T, text: string): string {
-  return text.replace(/!\[[^\]]*\]\([^)]*\)|\[Image: [^\]]*\]|\[image\]/g, t('imageMarker'))
+  return formatTemplateMessage(text)
+    .replace(/!\[[^\]]*\]\([^)]*\)|\[Image: [^\]]*\]|\[image\]/g, t('imageMarker'))
     .replace(/\[Chat card: [^\]]*\]/g, t('cardMarker'))
     .replace(/\[Media: [^\]]*\]/g, t('mediaMarker')).replace(/\[Merged forward\]/g, t('forwardMarker'))
     .replace(/@_user_\d+/g, t('unknownMention'))

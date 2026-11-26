@@ -3,8 +3,8 @@ import { useState } from 'react'
 import type { DecisionRow, ThreadFacts, ThreadRow, TicketRow } from './api.ts'
 import { Icon, Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
-import { actorName, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
+import { usePanel, usePanelData } from './provider.tsx'
+import { actorName, localized, readableMarkers, reasonLabel, sourceLabel, valueLabel } from './text.ts'
 import { ActionLink, ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
 
 export function TicketLine({ ticket, question, onChanged, context }: {
@@ -103,8 +103,9 @@ export function DecisionLine({ decision }: { decision: DecisionRow }) {
 
 function ThreadChip({ thread }: { thread: Pick<ThreadFacts, 'source' | 'facts' | 'url' | 'title'> }) {
   const { t } = usePanel()
+  const { state } = usePanelData()
   const cells = <>
-    <span className="dt-chip-source">{valueLabel(t, 'source', thread.source)}</span>
+    <span className="dt-chip-source" title={thread.source}>{sourceLabel(t, thread.source, state?.project_orchestrators)}</span>
     {Object.entries(thread.facts).map(([id, fact]) => <span key={id} className={fact.problem ? 'dt-chip-fact dt-chip-problem'
       : 'dt-chip-fact'}>
       {fact.label && <span className="dt-chip-label">{localized(t, fact.label)}</span>}{localized(t, fact.value)}

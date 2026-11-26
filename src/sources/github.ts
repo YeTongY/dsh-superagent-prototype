@@ -38,23 +38,23 @@ function scopeOf(meta: Record<string, unknown>): Scope | undefined {
 export const githubKind: SourceKind<GithubConfig> = {
   kind: SOURCE,
   title: { zh: 'GitHub', en: 'GitHub' },
-  description: { zh: '智能体的 GitHub 账号；接收仓库里发给它的通知、已订阅 Issue 与 PR 的讨论、CI 状态变化和 PR 合并关闭。', en: 'The agent\'s GitHub accounts; receives notifications to it in the repository, discussion on subscribed Issues and PRs, CI changes, and PR merge or close.' },
+  description: { zh: '使用 GitHub 账号监听仓库：接收 @ 通知、已关联 Issue 与 PR 的讨论、CI 状态变化和 PR 合并关闭。', en: 'Watches a repository with the agent\'s GitHub account: receives mentions, subscribed Issue/PR discussions, CI changes, and PR merge or close.' },
   schema: GithubConfigSchema,
   fields: [
     { key: 'repository', type: 'text', pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+', label: { zh: '监听的仓库', en: 'Repository' },
-      hint: { zh: '写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。', en: 'Written owner/name. This Source receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent.' } },
-    { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
-      hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
+      hint: { zh: '写作 owner/name。保存时会验证当前账号是否有推送权限，并重启服务生效。', en: 'Written owner/name. Saving checks that the agent account can push to it, then restarts the service.' } },
+    { key: 'cli', type: 'text', label: { zh: 'GitHub CLI 路径', en: 'Agent GitHub CLI' },
+      hint: { zh: '命令名或绝对路径（通常是已登录智能体账号的 gh 包装脚本）。工单执行器会以 gh 调用它；保存时检查推送权限并重启服务。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account. The runner calls it as gh; saving checks push access and restarts the service.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
-    { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
-    { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
-      hint: { zh: '打开后，没有 @ 智能体的新 Issue 也会收到，由策略的接收表决定是否成为候选。从打开的时候开始，不读以前的。', en: 'New Issues that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates. Starts when switched on; earlier ones are not read.' } },
-    { key: 'observePulls', type: 'switch', label: { zh: '接收仓库里的新 PR', en: 'Receive new pull requests in the repository' },
-      hint: { zh: '打开后，没有 @ 智能体的新 PR 也会收到，由策略的接收表决定是否成为候选。', en: 'New pull requests that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
-    { key: 'observeComments', type: 'switch', label: { zh: '接收仓库里的评论', en: 'Receive comments in the repository' },
-      hint: { zh: '打开后，Issue 和 PR 上没有 @ 智能体的评论和代码评论也会收到，由策略的接收表决定是否成为候选。', en: 'Comments and review comments on Issues and PRs that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
-    { key: 'observeCi', type: 'switch', label: { zh: '接收默认分支的 CI', en: 'Receive the default branch\'s CI' },
-      hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } }],
+    { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报错', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络波动会在下次轮询自动重试，无需报警。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
+    { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的全部新 Issue', en: 'Receive all new Issues in the repository' },
+      hint: { zh: '开启后，未 @ 智能体的新 Issue 也会进入触发权限判断（仅从开启后开始，不回溯历史）。', en: 'New Issues without an @ mention are received too, and the permission table decides whether AI assesses them. Starts when switched on.' } },
+    { key: 'observePulls', type: 'switch', label: { zh: '接收仓库里的全部新 PR', en: 'Receive all new pull requests in the repository' },
+      hint: { zh: '开启后，未 @ 智能体的新 PR 也会进入触发权限判断。', en: 'New pull requests without an @ mention are received too, and the permission table decides whether AI assesses them.' } },
+    { key: 'observeComments', type: 'switch', label: { zh: '接收仓库里的全部评论', en: 'Receive all comments in the repository' },
+      hint: { zh: '开启后，Issue 和 PR 上未 @ 智能体的评论与代码评审意见也会进入触发权限判断。', en: 'Comments and review comments on Issues and PRs without an @ mention are received too, and the permission table decides whether AI assesses them.' } },
+    { key: 'observeCi', type: 'switch', label: { zh: '接收默认分支的 CI 状态变化', en: 'Receive default branch CI changes' },
+      hint: { zh: '开启后，默认分支 CI 失败或恢复时会触发判断（是否自动接单由权限表和接单规则决定）。', en: 'Default branch CI failures and recoveries are received, and the permission table decides whether AI assesses them.' } }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
     const row = scopeOf(meta)
@@ -71,12 +71,12 @@ export const githubKind: SourceKind<GithubConfig> = {
   policy: {
     schema: z.object({ allowed: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9-]+$/) }).strict()).default([]),
       bots: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9-]+(\[bot\])?$/) }).strict()).optional() }).strict(),
-    fields: [{ key: 'allowed', type: 'rows', label: { zh: '能发起工作的 GitHub 账号', en: 'GitHub accounts that may originate work' },
-      columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9\\-]+' }] },
-    { key: 'bots', type: 'rows', label: { zh: '评论可以成为候选的机器人', en: 'Bots whose comments may become candidates' },
-      hint: { zh: '名单里的机器人账号（例如 dependabot[bot]）的评论在来源收到时成为推断的候选，交给评估：评论 @ 了智能体，或者打开了“接收仓库里的评论”。它们不能发起明确的请求，也不能停止工单；其他机器人的评论不接收。', en: 'A comment of a bot account on this list, such as dependabot[bot], becomes an inferred candidate for an assessment when the Source receives it: when it mentions the agent, or with Receive comments in the repository on. Such a comment never makes an explicit request or stops a ticket; other bots\' comments are not admitted.' },
-      columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9\\-]+(\\[bot\\])?' }] }],
-    explicit: { zh: '名单里的账号在 Issue 或评论里 @ 智能体的账号。', en: 'An account on the list mentions the agent\'s account in an Issue or a comment.' },
+    fields: [{ key: 'allowed', type: 'rows', label: { zh: '允许直接派活的 GitHub 账号', en: 'Allowlisted GitHub accounts' },
+      columns: [{ key: 'id', type: 'text', label: { zh: 'GitHub 用户名', en: 'Username' }, pattern: '[A-Za-z0-9\\-]+' }] },
+    { key: 'bots', type: 'rows', label: { zh: '允许触发 AI 判断的机器人', en: 'Bots whose comments AI may assess' },
+      hint: { zh: '白名单中的机器人（如 dependabot[bot]）在 @ 智能体或开启「接收仓库里的全部评论」时，消息会交给 AI 判断是否接单，但不能直接下指令或停止工单。', en: 'Comments from listed bots (e.g. dependabot[bot]) are sent to AI assessment when it mentions the agent or with Receive all comments in the repository on; they never directly start or stop tickets.' },
+      columns: [{ key: 'id', type: 'text', label: { zh: '机器人账号', en: 'Bot account' }, pattern: '[A-Za-z0-9\\-]+(\\[bot\\])?' }] }],
+    explicit: { zh: '白名单成员在 Issue、PR 或评论中 @ 智能体账号时，始终直接接单。', en: 'An allowlisted account mentioning the agent in an Issue, PR or comment always starts a Ticket directly.' },
     rows(stored) {
       const config = GithubConfigSchema.partial().parse(stored)
       const note = (observed: boolean | undefined) => observed ? { zh: '全部', en: 'All' } : { zh: '仅 @', en: '@ only' }

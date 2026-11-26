@@ -3,7 +3,7 @@ import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
 import { loadList, usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { Button, DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
@@ -46,7 +46,12 @@ export function ExecutionStatus({ filter: current, state, reload }: {
     <LoadState error={error} loading={!data} />
     {data && (data.items.length ? <ul className="dt-list">{data.items.map(ticket => ticket.stage === 'person'
       ? <TicketLine key={ticket.id} ticket={ticket} question
-        onChanged={reloadTickets} /> : <TicketLine key={ticket.id} ticket={ticket} />)}</ul> : <Hint>{t('none')}</Hint>)}
+        onChanged={reloadTickets} /> : <TicketLine key={ticket.id} ticket={ticket} />)}</ul>
+      : <div className="dt-empty-action">
+        <Hint>{t('none')}</Hint>
+        {current === 'open' && <Button variant="ghost" size="sm"
+          onClick={() => navigate({ page: 'execution', query: { filter: 'ended' } }, true)}>{t('viewEndedTickets')}</Button>}
+      </div>)}
     {data?.next_offset != null && <LoadMore onMore={() => setLimit(limit + 20)} />}
   </>
 }

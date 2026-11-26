@@ -3,9 +3,9 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type ThreadPageView, type TriggerRow } from './api.ts'
 import { Button, DisclosureRow, Icon, Tag } from './controls.tsx'
 import { decisionMark } from './marks.ts'
-import { useAction, usePanel } from './provider.tsx'
+import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { DecisionLine, Earlier, TicketLine, automatedRuns } from './rows.tsx'
-import { actorName, errorText, readableMarkers, reasonLabel, valueLabel, when, type T } from './text.ts'
+import { actorName, errorText, readableMarkers, reasonLabel, sourceLabel, valueLabel, when, type T } from './text.ts'
 import { ActionLink, ClampText, ConfirmButton, Hint, LoadState, PageHead, Section, When } from './widgets.tsx'
 
 /** Disposition tags for a Trigger; omits `ignore` (the common case) and suppresses fanout tags when every target Ticket is already listed in `subscribed`. */
@@ -107,6 +107,7 @@ function useThreadTimeline(key: string, target: string | undefined) {
 }
 export function ThreadPage({ id, target }: { id: string; target?: string }) {
   const { t, call, navigate, notify } = usePanel()
+  const { state } = usePanelData()
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const { data, error, reload, earlier } = useThreadTimeline(id, target)
   const requeue = useAction(async (trigger: string) => {
@@ -129,7 +130,7 @@ export function ThreadPage({ id, target }: { id: string; target?: string }) {
     <PageHead title={readableMarkers(t, data.title)}>{data.url && <ActionLink href={data.url}>{t('openOriginal')}</ActionLink>}</PageHead>
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
-      <span>{valueLabel(t, 'source', data.source)}</span><span>{t('threadLatest',
+      <span>{sourceLabel(t, data.source, state?.project_orchestrators)}</span><span>{t('threadLatest',
         { time: when(data.lastAt, t('lang')) })}</span><span>{t('threadCreated', { time: when(data.createdAt, t('lang')) })}</span>
     </div>
     {data.evaluating && <p className="dt-banner">

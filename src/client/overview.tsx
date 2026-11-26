@@ -82,7 +82,6 @@ export function OverviewPage() {
       <ul className="dt-list dt-cards">{data.problems.map((problem, index) => <ProblemLine key={index} problem={problem}
         onChanged={reload} />)}</ul>
     </Section>}
-    <ReporterStatus />
     <Section title={t('lastDay')} action={more({ page: 'trigger', query: { filter: 'recent' } })}>
       {/* Received and evaluated counts operate on Triggers rather than Threads or Decisions, so they do not link to filtered views. */}
       <div className="dt-stats">
@@ -101,5 +100,6 @@ export function OverviewPage() {
         {stat(t('idleLabel'), data.executor.idle)}
       </div>}
     </Section>
+    <ReporterStatus />
   </>
 }

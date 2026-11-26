@@ -11,12 +11,12 @@ it('marks each Ticket stage by whom it waits for, and an ended Ticket by its out
     { stage: 'working' }, { stage: 'idle' }] as const
   expect(marks.map(stage => { const { label, tone, dot, icon } = ticketMark(t, { ...stage, ended: undefined }); return [label, tone, dot,
     icon] })).toEqual([
-    ['待回答', 'warning', 'warning', 'ask'], ['待验收', 'warning', 'warning', 'review'], ['待处理受阻', 'warning', 'warning', 'blocked'],
-    ['待处理失败', 'danger', 'error', 'alert'], ['输入未送达', 'warning', 'warning', 'inbox'], ['排队中', 'neutral', 'idle', 'queue'],
-    ['执行中', 'info', 'ongoing', 'running'], ['等待新触发', 'neutral', 'idle', 'clock']])
+    [zh['stage.answer'], 'warning', 'warning', 'ask'], [zh['stage.review'], 'warning', 'warning', 'review'], [zh['stage.blocked'], 'warning', 'warning', 'blocked'],
+    [zh['stage.failed'], 'danger', 'error', 'alert'], [zh['stage.delivery'], 'warning', 'warning', 'inbox'], [zh['stage.queued'], 'neutral', 'idle', 'queue'],
+    [zh['stage.working'], 'info', 'ongoing', 'running'], [zh['stage.idle'], 'neutral', 'idle', 'clock']])
   const ended = (['completed', 'merged', 'closed', 'dropped', 'stopped'] as const).map(outcome => ticketMark(t, { stage: 'ended',
     ended: { at: '', by: outcome === 'stopped' ? 'human' : 'executor', outcome } }))
-  expect(ended.map(mark => mark.label)).toEqual(['已完成', 'PR 已合并', 'PR 已关闭（未合并）', '无需处理', '人工停止'])
+  expect(ended.map(mark => mark.label)).toEqual([zh['outcome.completed'], zh['outcome.merged'], zh['outcome.closed'], zh['outcome.dropped'], zh['outcome.stopped']])
   expect(new Set(ended.map(({ tone, dot, icon }) => `${tone} ${dot} ${icon}`))).toEqual(new Set(['neutral idle stop']))
   expect(['failed', 'blocked', 'waiting', 'ready', 'progress', undefined].map(reportDot)).toEqual(['error', 'warning', 'warning', 'done',
     'ongoing', 'ongoing'])
@@ -25,13 +25,13 @@ it('marks each Ticket stage by whom it waits for, and an ended Ticket by its out
 it('marks each Thread stage, Source state and Decision outcome', () => {
   const threads = (['error', 'evaluating', 'queued', 'subscribed', 'dormant', 'unsubscribed'] as const).map(stage => threadMark(t,
     { stage, pending: 2 }))
-  expect(threads.map(({ label, dot, icon }) => [label, dot, icon])).toEqual([['轮询失败', 'error', 'alert'], ['评估进行中', 'ongoing', 'running'],
-    ['排队 2', 'warning', 'queue'], ['已订阅', 'done', 'inbox'], ['工单已结束', 'idle', 'clock'], ['未订阅', 'idle', 'hash']])
+  expect(threads.map(({ label, dot, icon }) => [label, dot, icon])).toEqual([[zh.threadPollFailed, 'error', 'alert'], [zh.threadEvaluating, 'ongoing', 'running'],
+    ['排队 2', 'warning', 'queue'], [zh.threadSubscribed, 'done', 'inbox'], [zh.threadDormantShort, 'idle', 'clock'], [zh.threadUnsubscribed, 'idle', 'hash']])
   const sources = (['missing', 'off', 'error', 'setup', 'starting', 'paused', 'ready'] as const).map(state => sourceMark(t, state))
-  expect(sources.map(({ label, dot }) => [label, dot])).toEqual([['插件未安装', 'idle'], ['已关闭', 'idle'], ['出错', 'error'],
-    ['等待部署检查', 'idle'], ['启动中', 'ongoing'], ['待处理', 'warning'], ['运行中', 'done']])
+  expect(sources.map(({ label, dot }) => [label, dot])).toEqual([[zh.sourceNotInstalled, 'idle'], [zh.sourceOff, 'idle'], [zh['sourceState.error'], 'error'],
+    [zh['sourceState.setup'], 'idle'], [zh['sourceState.ongoing'], 'ongoing'], [zh['sourceState.warning'], 'warning'], [zh['sourceState.done'], 'done']])
   const decisions = (['accept', 'reopen', 'stop', 'ignore', 'unavailable', 'wouldAccept'] as const).map(outcome => decisionMark(t, outcome))
-  expect(decisions.map(({ label, tone, dot, icon }) => [label, tone, dot, icon])).toEqual([['接单', 'success', 'done', 'decision'],
-    ['续做', 'success', 'done', 'refresh'], ['停止', 'danger', 'idle', 'stop'], ['忽略', 'neutral', 'idle', 'dismiss'],
-    ['未完成', 'warning', 'warning', 'alert'], ['忽略（可接单，仅观察）', 'warning', 'idle', 'dismiss']])
+  expect(decisions.map(({ label, tone, dot, icon }) => [label, tone, dot, icon])).toEqual([[zh['decision.accept'], 'success', 'done', 'decision'],
+    [zh['decision.reopen'], 'success', 'done', 'refresh'], [zh['decision.stop'], 'danger', 'idle', 'stop'], [zh['decision.ignore'], 'neutral', 'idle', 'dismiss'],
+    [zh['decision.unavailable'], 'warning', 'warning', 'alert'], [zh.wouldAccept, 'warning', 'idle', 'dismiss']])
 })

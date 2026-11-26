@@ -4,8 +4,8 @@ import type { SetupProblem } from '../setup.ts'
 import { Button, Icon, InfoTip, Modal, StateDot, type DotState, type IconName } from './controls.tsx'
 import { inlines, linkify, markdownBlocks, type Inline } from './markdown.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
-import { settingsRoute, type SettingsGroup } from './route.ts'
 import { errorText, fullTime, readableMarkers, setupText, when } from './text.ts'
+import { settingsRoute } from './route.ts'
 
 const external = { target: '_blank', rel: 'noopener noreferrer' } as const
 
@@ -115,12 +115,18 @@ export function LoadMore({ onMore }: { onMore: () => void }) {
   return <Button variant="outline" size="sm" icon={<Icon name="chevron-down" size={14} />} onClick={onMore}>{t('loadMore')}</Button>
 }
 
-export function StatusHead({ hint, settings }: { hint: string; settings?: SettingsGroup }) {
+const STATUS_TITLE = { source: 'statusTitle.source', trigger: 'statusTitle.trigger', eval: 'statusTitle.eval', execution: 'statusTitle.execution' } as const
+const OPEN_SETTINGS_BTN = { source: 'openSettingsBtn.source', eval: 'openSettingsBtn.eval', execution: 'openSettingsBtn.execution' } as const
+export function StatusHead({ title, hint, settings, page }: {
+  title?: string; hint: string; settings?: 'source' | 'eval' | 'execution'; page?: keyof typeof STATUS_TITLE
+}) {
   const { t, navigate } = usePanel()
+  const key = page ?? settings
+  const heading = title ?? (key ? t(STATUS_TITLE[key]) : t('statusTitle'))
   return <div className="dt-status-head">
-    <h2 className="dt-status-title">{t('statusTitle')}<InfoTip text={hint} /></h2>
-    {settings && <Button variant="ghost" size="sm" icon={<Icon name="settings" />}
-      onClick={() => navigate(settingsRoute(settings))}>{t('tab.settings')}</Button>}
+    <h2 className="dt-status-title">{heading}<InfoTip text={hint} /></h2>
+    {settings && <Button variant="outline" size="sm" icon={<Icon name="settings" />}
+      onClick={() => navigate(settingsRoute(settings))}>{t(OPEN_SETTINGS_BTN[settings])}</Button>}
   </div>
 }
 export function PageHead({ title, children }: { title: ReactNode; children?: ReactNode }) {
